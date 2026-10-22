@@ -1,8 +1,7 @@
-![backend](https://github.com/tsl0922/ttyd/workflows/backend/badge.svg)
-![frontend](https://github.com/tsl0922/ttyd/workflows/frontend/badge.svg)
+[![backend](https://github.com/l1xnan/ttyd-rs/actions/workflows/backend.yml/badge.svg)](https://github.com/l1xnan/ttyd-rs/actions/workflows/backend.yml)
+[![frontend](https://github.com/l1xnan/ttyd-rs/actions/workflows/frontend.yml/badge.svg)](https://github.com/l1xnan/ttyd-rs/actions/workflows/frontend.yml)
 [![GitHub Releases](https://img.shields.io/github/downloads/l1xnan/ttyd-rs/total)](https://github.com/l1xnan/ttyd-rs/releases)
-[![Packaging status](https://repology.org/badge/tiny-repos/ttyd.svg)](https://repology.org/project/ttyd/versions)
-![GitHub](https://img.shields.io/github/license/tsl0922/ttyd)
+[![License](https://img.shields.io/github/license/l1xnan/ttyd-rs)](https://github.com/l1xnan/ttyd-rs/blob/main/LICENSE)
 
 [English](README.md) | 简体中文
 
@@ -10,7 +9,7 @@
 
 ttyd 是一个简单的命令行工具，可通过 Web 共享终端。
 
-![截图](https://github.com/tsl0922/ttyd/raw/main/screenshot.gif)
+![截图](screenshot.gif)
 
 # 特性
 
@@ -123,7 +122,7 @@ cargo build --release --manifest-path rust/Cargo.toml
     -h, --help              打印帮助信息并退出
 ```
 
-在 [wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage) 中阅读示例用法。
+在[上游 ttyd wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage)中阅读示例用法。
 
 ## 认证
 

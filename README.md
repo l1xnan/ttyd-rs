@@ -1,14 +1,15 @@
-![backend](https://github.com/tsl0922/ttyd/workflows/backend/badge.svg)
-![frontend](https://github.com/tsl0922/ttyd/workflows/frontend/badge.svg)
+[![backend](https://github.com/l1xnan/ttyd-rs/actions/workflows/backend.yml/badge.svg)](https://github.com/l1xnan/ttyd-rs/actions/workflows/backend.yml)
+[![frontend](https://github.com/l1xnan/ttyd-rs/actions/workflows/frontend.yml/badge.svg)](https://github.com/l1xnan/ttyd-rs/actions/workflows/frontend.yml)
 [![GitHub Releases](https://img.shields.io/github/downloads/l1xnan/ttyd-rs/total)](https://github.com/l1xnan/ttyd-rs/releases)
-[![Packaging status](https://repology.org/badge/tiny-repos/ttyd.svg)](https://repology.org/project/ttyd/versions)
-![GitHub](https://img.shields.io/github/license/tsl0922/ttyd)
+[![License](https://img.shields.io/github/license/l1xnan/ttyd-rs)](https://github.com/l1xnan/ttyd-rs/blob/main/LICENSE)
+
+English | [简体中文](README.zh.md)
 
 # ttyd - Share your terminal over the web
 
 ttyd is a simple command-line tool for sharing terminal over the web.
 
-![screenshot](https://github.com/tsl0922/ttyd/raw/main/screenshot.gif)
+![screenshot](screenshot.gif)
 
 # Features
 
@@ -129,7 +130,7 @@ OPTIONS:
     -h, --help              Print this text and exit
 ```
 
-Read the example usage on the [wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage).
+Read the example usage on the [upstream ttyd wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage).
 
 ## Authentication
 
