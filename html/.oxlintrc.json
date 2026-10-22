@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "browser": true
+  },
+  "ignorePatterns": ["dist", "node_modules", "src/favicon.png"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^h$" }],
+    "typescript/no-duplicate-enum-values": "off",
+    "typescript/no-explicit-any": "off"
+  },
+  "overrides": [
+    {
+      "files": ["vite.config.ts"],
+      "env": {
+        "node": true
+      }
+    }
+  ]
+}

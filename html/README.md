@@ -29,3 +29,9 @@ This writes:
 
 - `dist/index.html` — single-file frontend
 - `dist/index.html.gz` — compressed asset embedded by the Rust backend
+
+## Compatibility notes
+
+- TypeScript 7 is used for type checking. Linting and formatting are handled by oxlint and oxfmt.
+- xterm.js 6 removed the canvas renderer addon. `rendererType=canvas` is still accepted for
+  backwards compatibility, but falls back to the DOM renderer; use `webgl` or `dom` instead.
