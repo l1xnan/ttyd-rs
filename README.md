@@ -25,10 +25,44 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 # Installation
 
 Prebuilt binaries are distributed only through this project's
-[GitHub Releases](https://github.com/l1xnan/ttyd-rs/releases) page. Download the
-archive for your platform (Linux, macOS, or Windows), extract it, and place
-`ttyd` (`ttyd.exe` on Windows) on your `PATH`. No package-manager packages are
-currently provided for this project.
+[GitHub Releases](https://github.com/l1xnan/ttyd-rs/releases) page. Each release
+asset is a single executable, not an archive.
+
+| Asset | Platform | Architecture | When to use |
+| --- | --- | --- | --- |
+| `ttyd.x86_64` | Linux | x86_64 | Most 64-bit PCs, servers, and VMs, including x86_64 WSL |
+| `ttyd.aarch64` | Linux | ARM64 | 64-bit ARM systems, such as Raspberry Pi 3/4/5 with a 64-bit OS |
+| `ttyd.armhf` | Linux | ARMv7 hard-float | 32-bit ARM systems, such as Raspberry Pi 2/3/4 with a 32-bit OS |
+| `ttyd.i686` | Linux | 32-bit x86 | Older 32-bit x86 systems; use `ttyd.x86_64` on 64-bit x86 |
+| `ttyd.macos-x86_64` | macOS | Intel x86_64 | Intel-based Macs |
+| `ttyd.macos-arm64` | macOS | Apple Silicon | Apple Silicon (M-series) Macs |
+| `ttyd.win32.exe` | Windows | x86_64 | 64-bit Windows 10/11 |
+
+The Linux binaries are statically linked against musl, so they do not depend on
+the host's glibc version. `ttyd.armhf` requires an ARMv7 CPU with hardware
+floating-point support and does not run on ARMv6 devices such as Raspberry Pi 1
+or Zero.
+
+Download the file for your platform and put it on your `PATH` as `ttyd`
+(`ttyd.exe` on Windows). For example, on Linux or macOS:
+
+```sh
+chmod +x ttyd.x86_64
+sudo mv ttyd.x86_64 /usr/local/bin/ttyd
+```
+
+Replace the filename in the example with the asset you downloaded. On Windows,
+rename `ttyd.win32.exe` to `ttyd.exe` and move it to a directory on your `PATH`.
+
+If macOS blocks the unsigned binary, allow it in **System Settings > Privacy &
+Security**, or remove the quarantine attribute:
+
+```sh
+xattr -d com.apple.quarantine ttyd
+```
+
+`SHA256SUMS` is provided on the release page for verifying downloaded files. No
+package-manager packages are currently provided for this project.
 
 On Windows, ttyd starts the command in a ConPTY. `-s` / `--signal` does not deliver that signal, and there is no process group; when the session ends, the child is terminated.
 

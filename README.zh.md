@@ -27,7 +27,36 @@ ttyd 是一个简单的命令行工具，可通过 Web 共享终端。
 # 安装
 
 预编译二进制文件仅通过本项目的
-[GitHub Releases](https://github.com/l1xnan/ttyd-rs/releases) 页面分发。请下载适用于你的平台（Linux、macOS 或 Windows）的压缩包，解压后将 `ttyd`（Windows 上为 `ttyd.exe`）放到 `PATH` 中。本项目目前不提供包管理器安装方式。
+[GitHub Releases](https://github.com/l1xnan/ttyd-rs/releases) 页面分发。每个发布文件都是可直接运行的二进制，不是压缩包。
+
+| 文件 | 平台 | 架构 | 适用情况 |
+| --- | --- | --- | --- |
+| `ttyd.x86_64` | Linux | x86_64 | 绝大多数 64 位 PC、服务器和虚拟机，包括 x86_64 WSL |
+| `ttyd.aarch64` | Linux | ARM64 | 64 位 ARM 系统，如安装 64 位系统的树莓派 3/4/5 |
+| `ttyd.armhf` | Linux | ARMv7 硬浮点 | 32 位 ARM 系统，如安装 32 位系统的树莓派 2/3/4 |
+| `ttyd.i686` | Linux | 32 位 x86 | 较旧的 32 位 x86 系统；64 位 x86 请使用 `ttyd.x86_64` |
+| `ttyd.macos-x86_64` | macOS | Intel x86_64 | Intel 芯片 Mac |
+| `ttyd.macos-arm64` | macOS | Apple Silicon | Apple Silicon（M 系列）芯片 Mac |
+| `ttyd.win32.exe` | Windows | x86_64 | 64 位 Windows 10/11 |
+
+Linux 二进制使用 musl 静态链接，不依赖宿主机的 glibc 版本。`ttyd.armhf` 需要支持硬件浮点的 ARMv7 CPU，无法在树莓派 1、Zero 等 ARMv6 设备上运行。
+
+下载对应文件后，将其放到 `PATH` 中并命名为 `ttyd`（Windows 上为 `ttyd.exe`）。例如在 Linux 或 macOS 上：
+
+```sh
+chmod +x ttyd.x86_64
+sudo mv ttyd.x86_64 /usr/local/bin/ttyd
+```
+
+请把示例中的文件名替换为你实际下载的文件。Windows 上可将 `ttyd.win32.exe` 重命名为 `ttyd.exe`，然后移动到 `PATH` 中的某个目录。
+
+如果 macOS 阻止运行未签名的二进制，可在**系统设置 > 隐私与安全性**中允许，或移除隔离属性：
+
+```sh
+xattr -d com.apple.quarantine ttyd
+```
+
+发布页面同时提供 `SHA256SUMS`，可用于校验下载文件的完整性。本项目目前不提供包管理器安装方式。
 
 在 Windows 上，ttyd 会在 ConPTY 中启动命令。`-s` / `--signal` 不会传递该信号，也不存在进程组；会话结束时，子进程会被终止。
 
