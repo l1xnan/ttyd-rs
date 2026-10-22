@@ -1,6 +1,6 @@
 ![backend](https://github.com/tsl0922/ttyd/workflows/backend/badge.svg)
 ![frontend](https://github.com/tsl0922/ttyd/workflows/frontend/badge.svg)
-[![GitHub Releases](https://img.shields.io/github/downloads/tsl0922/ttyd/total)](https://github.com/tsl0922/ttyd/releases)
+[![GitHub Releases](https://img.shields.io/github/downloads/l1xnan/ttyd-rs/total)](https://github.com/l1xnan/ttyd-rs/releases)
 [![Docker Pulls](https://img.shields.io/docker/pulls/tsl0922/ttyd)](https://hub.docker.com/r/tsl0922/ttyd)
 [![Packaging status](https://repology.org/badge/tiny-repos/ttyd.svg)](https://repology.org/project/ttyd/versions)
 ![GitHub](https://img.shields.io/github/license/tsl0922/ttyd)
@@ -25,26 +25,11 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 
 # Installation
 
-## Install on macOS
-
-- Install with [Homebrew](http://brew.sh): `brew install ttyd`
-- Install with [MacPorts](https://www.macports.org): `sudo port install ttyd`
-
-## Install on Linux
-
-- Install on Debian/Ubuntu: `sudo apt install ttyd`
-- Install the snap: `sudo snap install ttyd --classic`
-- Install on OpenWrt: `opkg install ttyd`
-- Install on Gentoo: clone the [repo](https://bitbucket.org/mgpagano/ttyd/src/master) and follow the directions [here](https://wiki.gentoo.org/wiki/Custom_repository#Creating_a_local_repository).
-- Install with [Homebrew](https://docs.brew.sh/Homebrew-on-Linux) : `brew install ttyd`
-- Precompiled static binaries: download from the [releases](https://github.com/tsl0922/ttyd/releases) page
-
-## Install on Windows
-
-- Binary version (recommended): download from the [releases](https://github.com/tsl0922/ttyd/releases) page
-- Install with [WinGet](https://github.com/microsoft/winget-cli): `winget install tsl0922.ttyd`
-- Install with [Scoop](https://scoop.sh/#/apps?q=ttyd&s=2&d=1&o=true): `scoop install ttyd`
-- Build from source using the instructions below
+Prebuilt binaries are distributed only through this project's
+[GitHub Releases](https://github.com/l1xnan/ttyd-rs/releases) page. Download the
+archive for your platform (Linux, macOS, or Windows), extract it, and place
+`ttyd` (`ttyd.exe` on Windows) on your `PATH`. No package-manager packages are
+currently provided for this project.
 
 On Windows, ttyd starts the command in a ConPTY. `-s` / `--signal` does not deliver that signal, and there is no process group; when the session ends, the child is terminated.
 
