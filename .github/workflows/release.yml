@@ -10,19 +10,21 @@ jobs:
   publish:
     needs: [build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
       - name: Check version bump
         run: |
           TAG=$(git describe --tags --match "[0-9]*.[0-9]*.[0-9]*" --abbrev=8)
-          VERSION=$(grep project CMakeLists.txt| awk '{print $3}')
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n1)
           if [ "$TAG" != "$VERSION" ]; then
-            echo "=== Version in CMakeLists.txt and git tag does not match!"
+            echo "=== Version in rust/Cargo.toml and git tag does not match!"
             echo "=== Git Tag: $TAG, Version: $VERSION"
             exit 1
           fi
       - uses: actions/download-artifact@v8
-        
+
       - run: |
           mkdir build
           for file in ttyd.*/*; do

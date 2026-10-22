@@ -13,17 +13,35 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
-      - name: Install packages
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: html/pnpm-lock.yaml
+      - name: Build frontend
+        working-directory: html
         run: |
-          sudo apt-get update
-          sudo apt-get install -y autoconf automake build-essential cmake curl file libtool
-      - name: Cross build multi-arch binary
+          pnpm install --frozen-lockfile
+          pnpm run build
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Cross build multi-arch binaries
         run: |
           mkdir dist
-          for arch in amd64 armv7 arm64 s390x; do
-            env BUILD_TARGET=$arch ./scripts/cross-build.sh
-            [ "$arch" = "armv7" ] && arch="arm" 
-            mkdir -p dist/$arch && cp build/ttyd dist/$arch/ttyd
+          for entry in \
+            "amd64:x86_64-unknown-linux-musl" \
+            "arm64:aarch64-unknown-linux-musl" \
+            "arm:armv7-unknown-linux-musleabihf"
+          do
+            arch=${entry%%:*}
+            target=${entry##*:}
+            cross build --manifest-path rust/Cargo.toml --release --target "$target"
+            mkdir -p "dist/$arch"
+            cp "rust/target/$target/release/ttyd" "dist/$arch/ttyd"
           done
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
@@ -48,13 +66,14 @@ jobs:
             *)
               echo "DOCKER_TAG=tsl0922/ttyd:latest" >> $GITHUB_ENV
               echo "ALPINE_TAG=tsl0922/ttyd:alpine" >> $GITHUB_ENV
+              ;;
           esac
       - name: build/push docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm/v7,linux/arm64,linux/s390x
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
           push: true
           tags: |
             ${{ env.DOCKER_TAG }}
@@ -64,7 +83,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.alpine
-          platforms: linux/amd64,linux/arm/v7,linux/arm64,linux/s390x
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
           push: true
           tags: |
             ${{ env.ALPINE_TAG }}

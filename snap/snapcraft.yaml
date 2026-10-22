@@ -16,34 +16,25 @@ assumes:
 
 apps:
   ttyd:
-    command: usr/bin/ttyd
-    command-chain: 
-      - bin/homeishome-launch       
+    command: bin/ttyd
+    command-chain:
+      - bin/homeishome-launch
 
 parts:
   ttyd:
     source: https://github.com/tsl0922/ttyd
     source-type: git
-    plugin: cmake
-    cmake-parameters:
-      - -DCMAKE_INSTALL_PREFIX=/usr
-    build-environment:
-      - LDFLAGS: "-pthread"
-      
+    plugin: rust
+    rust-channel: "1.88"
+    rust-path:
+      - rust
     override-pull: |
       snapcraftctl pull
       snapcraftctl set-version "$(git describe --tags | sed 's/^v//' | cut -d "-" -f1)"
-      
     build-packages:
-      - build-essential 
-      - libjson-c-dev 
-      - libwebsockets-dev
-      
-    stage-packages:
-      - libjson-c4
-      - libwebsockets15
-      
+      - build-essential
+
   homeishome-launch:
     plugin: nil
     stage-snaps:
-      - homeishome-launch  
+      - homeishome-launch

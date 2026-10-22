@@ -1,0 +1,17 @@
+{
+  "singleQuote": true,
+  "trailingComma": "es5",
+  "bracketSpacing": true,
+  "tabWidth": 4,
+  "printWidth": 120,
+  "arrowParens": "avoid",
+  "endOfLine": "lf",
+  "overrides": [
+    {
+      "files": ["*.{json,jsonc,yml,yaml,scss,css,html}"],
+      "options": {
+        "tabWidth": 2
+      }
+    }
+  ]
+}

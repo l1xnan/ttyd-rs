@@ -193,7 +193,7 @@ export class Xterm {
                 if (this.terminal.getSelection() === '') return;
                 try {
                     document.execCommand('copy');
-                } catch (e) {
+                } catch {
                     return;
                 }
                 this.overlayAddon?.showOverlay('\u2702', 200);

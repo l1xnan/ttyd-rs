@@ -1,0 +1,8 @@
+.git
+.github
+html/node_modules
+html/src
+html/dist/index.html
+rust/target
+rust/target-linux
+target

@@ -10,14 +10,14 @@ ttyd 1 "September 2016" ttyd "User Manual"
 # DESCRIPTION
   ttyd is a command-line tool for sharing terminal over the web that runs in *nix and windows systems, with the following features:
 
-  - Built on top of Libwebsockets with libuv for speed
+  - Rust backend built on [Tokio](https://tokio.rs) and [Axum](https://github.com/tokio-rs/axum)
   - Fully-featured terminal based on Xterm.js with CJK (Chinese, Japanese, Korean) and IME support
   - Graphical ZMODEM integration with lrzsz support
   - Sixel image output support
-  - SSL support based on OpenSSL
+  - TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
   - Run any custom command with options
-  - Basic authentication support and many other custom options
-  - Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
+  - Basic authentication and reverse-proxy header authentication
+  - Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, `-s` does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
 # OPTIONS
   -p, --port <port>
@@ -42,7 +42,7 @@ ttyd 1 "September 2016" ttyd "User Manual"
       Group id to run with
 
   -s, --signal <signal string>
-      Signal to send to the command when exit it (default: 1, SIGHUP)
+      Signal to send to the command when exit it (default: 1, SIGHUP). On Windows the signal is not delivered and there is no process group; the child is terminated instead
 
   -w, --cwd <path>
       Working directory to be set for the child program
@@ -84,7 +84,7 @@ ttyd 1 "September 2016" ttyd "User Manual"
       Websocket ping interval(sec) (default: 5)
 
   -f, --srv-buf-size
-      Maximum chunk of file (in bytes) that can be sent at once, a larger value may improve throughput (default: 4096)
+      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)
 
   -6, --ipv6
       Enable IPv6 support

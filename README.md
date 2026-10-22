@@ -13,14 +13,15 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 
 # Features
 
-- Built on top of [libuv](https://libuv.org) and [WebGL2](https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API) for speed
+- Rust backend built on [Tokio](https://tokio.rs) and [Axum](https://github.com/tokio-rs/axum), with a single-file [xterm.js](https://xtermjs.org) frontend
 - Fully-featured terminal with [CJK](https://en.wikipedia.org/wiki/CJK_characters) and IME support
 - [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM) ([lrzsz](https://ohse.de/uwe/software/lrzsz.html)) / [trzsz](https://trzsz.github.io) file transfer support
 - [Sixel](https://en.wikipedia.org/wiki/Sixel) image output support ([img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix))
-- SSL support based on [OpenSSL](https://www.openssl.org) / [Mbed TLS](https://github.com/Mbed-TLS/mbedtls)
+- TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
 - Run any custom command with options
-- Basic authentication support and many other custom options
-- Cross platform: macOS, Linux, FreeBSD/OpenBSD, [OpenWrt](https://openwrt.org), Windows
+- Basic authentication and reverse-proxy header authentication
+- IPv4, IPv6, TCP and UNIX domain sockets
+- Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, `-s` does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
 # Installation
 
@@ -43,7 +44,31 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 - Binary version (recommended): download from the [releases](https://github.com/tsl0922/ttyd/releases) page
 - Install with [WinGet](https://github.com/microsoft/winget-cli): `winget install tsl0922.ttyd`
 - Install with [Scoop](https://scoop.sh/#/apps?q=ttyd&s=2&d=1&o=true): `scoop install ttyd`
-- [Compile on Windows](https://github.com/tsl0922/ttyd/wiki/Compile-on-Windows)
+- Build from source using the instructions below
+
+On Windows, ttyd starts the command in a ConPTY. `-s` / `--signal` does not deliver that signal, and there is no process group; when the session ends, the child is terminated.
+
+## Build from source
+
+The frontend is embedded into the Rust binary at compile time, so build it first.
+
+Prerequisites:
+
+- Rust 1.88 or newer (`rustup` recommended)
+- Node.js 22.12 or newer
+- pnpm 12 (`corepack enable` is sufficient)
+- A C compiler for the TLS dependency (`build-essential` on Debian/Ubuntu, Xcode Command Line Tools on macOS, Visual Studio Build Tools on Windows)
+
+```sh
+pnpm --dir html install --frozen-lockfile
+pnpm --dir html run check
+pnpm --dir html run build
+cargo build --release --manifest-path rust/Cargo.toml
+```
+
+The binary is written to `rust/target/release/ttyd` (or `ttyd.exe` on Windows).
+
+For development, run `cargo run --manifest-path rust/Cargo.toml -- -W bash` after building the frontend once. When changing frontend sources, use the Vite development workflow described in [html/README.md](html/README.md).
 
 # Usage
 
@@ -61,7 +86,7 @@ OPTIONS:
     -H, --auth-header       HTTP Header name for auth proxy, this will configure ttyd to let a HTTP reverse proxy handle authentication
     -u, --uid               User id to run with
     -g, --gid               Group id to run with
-    -s, --signal            Signal to send to the command when exit it (default: 1, SIGHUP)
+    -s, --signal            Signal to send to the command when exit it (default: 1, SIGHUP). On Windows the child is terminated instead
     -w, --cwd               Working directory to be set for the child program
     -a, --url-arg           Allow client to send command line arguments in URL (eg: http://localhost:7681?arg=foo&arg=bar)
     -W, --writable          Allow clients to write to the TTY (readonly by default)
@@ -75,6 +100,7 @@ OPTIONS:
     -I, --index             Custom index.html path
     -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)
     -P, --ping-interval     Websocket ping interval(sec) (default: 5)
+    -f, --srv-buf-size      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)
     -6, --ipv6              Enable IPv6 support
     -S, --ssl               Enable SSL
     -C, --ssl-cert          SSL certificate file path

@@ -167,7 +167,6 @@ export class ZmodemAddon implements ITerminalAddon {
         this.options.writer(`${name} ${percent}% ${bytesHuman(offset, 2)}/${bytesHuman(size, 2)}\r`);
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     private bytesHuman(bytes: any, precision: number): string {
         if (!/^([-+])?|(\.\d+)(\d+(\.\d+)?|(\d+\.)|Infinity)$/.test(bytes)) {
             return '-';

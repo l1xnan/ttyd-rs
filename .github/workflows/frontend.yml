@@ -4,25 +4,35 @@ on:
   push:
     paths:
     - ".github/workflows/frontend.yml"
-    - "html/*"
+    - "html/**"
   pull_request:
     paths:
     - ".github/workflows/frontend.yml"
-    - "html/*"
+    - "html/**"
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
       - uses: actions/setup-node@v6
         with:
-          node-version: 18
-      - name: Run yarn install, check and build
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: html/pnpm-lock.yaml
+      - name: Install, check and build
         run: |
-          corepack enable
-          corepack prepare yarn@stable --activate
-          yarn install
-          yarn run check
-          yarn run build
+          pnpm install --frozen-lockfile
+          pnpm run check
+          pnpm run build
+        working-directory: html
+      - name: Verify single-file output
+        run: |
+          test -s dist/index.html
+          test -s dist/index.html.gz
+          ! grep -qE '<script[^>]+src=' dist/index.html
+          ! grep -qE '<link[^>]+rel="stylesheet"' dist/index.html
         working-directory: html

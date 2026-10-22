@@ -17,7 +17,7 @@ ttyd is a command-line tool for sharing terminal over the web that runs in *nix 
 
 .RS
 .IP \(bu 2
-Built on top of Libwebsockets with libuv for speed
+Rust backend built on Tokio and Axum
 .IP \(bu 2
 Fully-featured terminal based on Xterm.js with CJK (Chinese, Japanese, Korean) and IME support
 .IP \(bu 2
@@ -25,13 +25,13 @@ Graphical ZMODEM integration with lrzsz support
 .IP \(bu 2
 Sixel image output support
 .IP \(bu 2
-SSL support based on OpenSSL
+TLS and mutual TLS support based on rustls
 .IP \(bu 2
 Run any custom command with options
 .IP \(bu 2
-Basic authentication support and many other custom options
+Basic authentication and reverse-proxy header authentication
 .IP \(bu 2
-Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
+Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, -s does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
 .RE
 
@@ -67,7 +67,7 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
 
 .PP
 -s, --signal 
-      Signal to send to the command when exit it (default: 1, SIGHUP)
+      Signal to send to the command when exit it (default: 1, SIGHUP). On Windows the signal is not delivered and there is no process group; the child is terminated instead
 
 .PP
 -w, --cwd 
@@ -123,7 +123,7 @@ Cross platform: macOS, Linux, FreeBSD/OpenBSD, OpenWrt/LEDE, Windows
 
 .PP
 -f, --srv-buf-size
-      Maximum chunk of file (in bytes) that can be sent at once, a larger value may improve throughput (default: 4096)
+      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)
 
 .PP
 -6, --ipv6

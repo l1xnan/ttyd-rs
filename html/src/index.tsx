@@ -1,9 +1,12 @@
-if (process.env.NODE_ENV === 'development') {
-    require('preact/debug');
-}
-import 'whatwg-fetch';
 import { h, render } from 'preact';
 import { App } from './components/app';
 import './style/index.scss';
 
-render(<App />, document.body);
+if (import.meta.env.DEV) {
+    void import('preact/debug');
+}
+
+const container = document.getElementById('app');
+if (container) {
+    render(<App />, container);
+}

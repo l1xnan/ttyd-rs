@@ -1,14 +1,31 @@
+# ttyd frontend
+
+The frontend is bundled into a single HTML file that is embedded in the ttyd
+binary.
+
 ## Prerequisites
 
-> **NOTE:** yarn v2 is required.
-
-Install [Yarn](https://yarnpkg.com/getting-started/install), and run: `yarn install`.
+- Node.js >= 22.12
+- pnpm 12
 
 ## Development
 
 1. Start ttyd: `ttyd bash`
-2. Start the dev server: `yarn run start`
+2. Start the Vite dev server: `pnpm run dev`
 
-## Publish
+The dev server listens on port 9000 and proxies `/token` and `/ws` to ttyd on
+port 7681. If ttyd is started with `--check-origin`, start it without that flag
+during development because the browser origin is the Vite server.
 
-Run `yarn run build`, this will compile the inlined html to `../src/html.h`.
+## Build
+
+```sh
+pnpm install
+pnpm run check
+pnpm run build
+```
+
+This writes:
+
+- `dist/index.html` — single-file frontend
+- `dist/index.html.gz` — compressed asset embedded by the Rust backend
