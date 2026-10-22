@@ -46,6 +46,6 @@
     "file-saver": "^2.0.5",
     "preact": "^11.0.1",
     "trzsz": "1.1.6",
-    "zmodem.js": "^0.1.10"
+    "zmodem-ts": "^1.0.8"
   }
 }

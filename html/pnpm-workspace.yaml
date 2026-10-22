@@ -5,5 +5,3 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - sass@1.106.0
   - vite@8.3.5
-patchedDependencies:
-  zmodem.js@0.1.10: patches/zmodem.js@0.1.10.patch

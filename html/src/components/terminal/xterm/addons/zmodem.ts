@@ -1,8 +1,50 @@
 import { bind } from 'decko';
 import { saveAs } from 'file-saver';
 import { IDisposable, ITerminalAddon, Terminal } from '@xterm/xterm';
-import * as Zmodem from 'zmodem.js/src/zmodem_browser';
+import Zmodem from 'zmodem-ts';
 import { TrzszFilter } from 'trzsz';
+
+const SEND_CHUNK_SIZE = 64 * 1024;
+
+interface ZmodemFileDetails {
+    name: string;
+    size: number;
+}
+
+interface ZmodemProgress {
+    get_details(): ZmodemFileDetails;
+    get_offset(): number;
+}
+
+interface ZmodemTransfer extends ZmodemProgress {
+    send(data: Uint8Array): void;
+    end(data?: Uint8Array): Promise<unknown>;
+}
+
+interface ZmodemOffer extends ZmodemProgress {
+    on(event: 'input' | 'complete', listener: () => void): void;
+    accept(): Promise<Uint8Array[]>;
+}
+
+interface ZmodemSession {
+    type: 'send' | 'receive';
+    on(event: 'session_end', listener: () => void): void;
+    on(event: 'offer', listener: (offer: ZmodemOffer) => void): void;
+    send_offer(details: {
+        name: string;
+        size: number;
+        mtime: Date;
+        files_remaining: number;
+        bytes_remaining: number;
+    }): Promise<ZmodemTransfer | '' | undefined>;
+    start(): Promise<unknown>;
+    close(): Promise<unknown>;
+}
+
+interface ZmodemDetection {
+    confirm(): ZmodemSession;
+    deny(): void;
+}
 
 export interface ZmodeOptions {
     zmodem: boolean;
@@ -17,9 +59,9 @@ export interface ZmodeOptions {
 export class ZmodemAddon implements ITerminalAddon {
     private disposables: IDisposable[] = [];
     private terminal: Terminal;
-    private sentry: Zmodem.Sentry;
-    private session: Zmodem.Session;
-    private denier: () => void;
+    private sentry: InstanceType<typeof Zmodem.Sentry>;
+    private session: ZmodemSession | null = null;
+    private denier: (() => void) | null = null;
     private trzszFilter: TrzszFilter;
 
     constructor(private options: ZmodeOptions) {}
@@ -52,6 +94,8 @@ export class ZmodemAddon implements ITerminalAddon {
 
     @bind
     private reset() {
+        this.session = null;
+        this.denier = null;
         this.terminal.options.disableStdin = false;
         this.terminal.focus();
     }
@@ -94,7 +138,6 @@ export class ZmodemAddon implements ITerminalAddon {
     private zmodemInit() {
         const { sender, writer } = this.options;
         const { terminal, reset, zmodemDetect } = this;
-        this.session = null;
         this.sentry = new Zmodem.Sentry({
             to_terminal: octets => writer(new Uint8Array(octets)),
             sender: octets => sender(new Uint8Array(octets)),
@@ -112,7 +155,7 @@ export class ZmodemAddon implements ITerminalAddon {
     }
 
     @bind
-    private zmodemDetect(detection: Zmodem.Detection): void {
+    private zmodemDetect(detection: ZmodemDetection): void {
         const { terminal, receiveFile } = this;
         terminal.options.disableStdin = true;
 
@@ -129,24 +172,68 @@ export class ZmodemAddon implements ITerminalAddon {
 
     @bind
     public sendFile(files: FileList) {
-        const { session, writeProgress } = this;
-        Zmodem.Browser.send_files(session, files, {
-            on_progress: (_, offer) => writeProgress(offer),
-        })
+        const { session } = this;
+        if (!session) return;
+
+        this.sendFiles(session, files)
             .then(() => session.close())
-            .catch(() => this.reset());
+            .catch(e => {
+                console.error('[ttyd] zmodem send: ', e);
+                this.reset();
+            });
+    }
+
+    private async sendFiles(session: ZmodemSession, files: FileList) {
+        const batch = Array.from(files);
+        let bytesRemaining = batch.reduce((total, file) => total + file.size, 0);
+
+        for (let i = 0; i < batch.length; i++) {
+            const file = batch[i];
+            const transfer = await session.send_offer({
+                name: file.name,
+                size: file.size,
+                mtime: new Date(file.lastModified),
+                files_remaining: batch.length - i,
+                bytes_remaining: bytesRemaining,
+            });
+            bytesRemaining -= file.size;
+
+            if (!transfer) continue;
+
+            let offset = transfer.get_offset();
+            if (offset >= file.size) {
+                await transfer.end();
+                this.writeProgress(transfer);
+            } else {
+                while (offset < file.size) {
+                    const end = Math.min(offset + SEND_CHUNK_SIZE, file.size);
+                    const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+                    offset = end;
+
+                    if (offset < file.size) {
+                        transfer.send(chunk);
+                        this.writeProgress(transfer);
+                    } else {
+                        const completed = transfer.end(chunk);
+                        this.writeProgress(transfer);
+                        await completed;
+                    }
+                }
+            }
+        }
     }
 
     @bind
     private receiveFile() {
         const { session, writeProgress } = this;
+        if (!session) return;
 
         session.on('offer', offer => {
             offer.on('input', () => writeProgress(offer));
             offer
                 .accept()
                 .then(payloads => {
-                    const blob = new Blob(payloads, { type: 'application/octet-stream' });
+                    const blob = new Blob(payloads as BlobPart[], { type: 'application/octet-stream' });
                     saveAs(blob, offer.get_details().name);
                 })
                 .catch(() => this.reset());
@@ -156,13 +243,13 @@ export class ZmodemAddon implements ITerminalAddon {
     }
 
     @bind
-    private writeProgress(offer: Zmodem.Offer) {
+    private writeProgress(progress: ZmodemProgress) {
         const { bytesHuman } = this;
-        const file = offer.get_details();
+        const file = progress.get_details();
         const name = file.name;
         const size = file.size;
-        const offset = offer.get_offset();
-        const percent = ((100 * offset) / size).toFixed(2);
+        const offset = progress.get_offset();
+        const percent = size > 0 ? ((100 * offset) / size).toFixed(2) : '100.00';
 
         this.options.writer(`${name} ${percent}% ${bytesHuman(offset, 2)}/${bytesHuman(size, 2)}\r`);
     }

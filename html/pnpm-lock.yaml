@@ -162,9 +162,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  zmodem.js@0.1.10: 5411e786ace86f7cc14db4723f129da1c21d04852f3c32a93f7021bdc64e37aa
-
 importers:
 
   .:
@@ -202,9 +199,9 @@ importers:
       trzsz:
         specifier: 1.1.6
         version: 1.1.6
-      zmodem.js:
-        specifier: ^0.1.10
-        version: 0.1.10(patch_hash=5411e786ace86f7cc14db4723f129da1c21d04852f3c32a93f7021bdc64e37aa)
+      zmodem-ts:
+        specifier: ^1.0.8
+        version: 1.0.8
     devDependencies:
       '@preact/preset-vite':
         specifier: ^2.10.6
@@ -1528,8 +1525,8 @@ packages:
   zimmerframe@1.1.5:
     resolution: {integrity: sha512-msJxIvYDYcoNL+PJsu+7qmpDWsYmAxTY+2TNYXXF0hzBzBk0BMecOqDOG/EckUoKCuKwObfbugIl8QpqHDXeFA==}
 
-  zmodem.js@0.1.10:
-    resolution: {integrity: sha512-Z1DWngunZ/j3BmIzSJpFZVNV73iHkj89rxXX4IciJdU9ga3nZ7rJ5LkfjV/QDsKhc7bazDWTTJCLJ+iRXD82dw==}
+  zmodem-ts@1.0.8:
+    resolution: {integrity: sha512-fMdPDG2Wrx6OwZhZERPSF5EnPFR4xR+3NSYbgNBc7gdT+Scnyvb29e91sK57c1iHxpCPJiWJB3IQ4iaYIX+P6A==}
 
 snapshots:
 
@@ -2503,6 +2500,6 @@ snapshots:
 
   zimmerframe@1.1.5: {}
 
-  zmodem.js@0.1.10(patch_hash=5411e786ace86f7cc14db4723f129da1c21d04852f3c32a93f7021bdc64e37aa):
+  zmodem-ts@1.0.8:
     dependencies:
       crc-32: 1.2.2
