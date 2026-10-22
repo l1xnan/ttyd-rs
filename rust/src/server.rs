@@ -1,21 +1,26 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::header::{
-    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HOST, LOCATION,
-    PROXY_AUTHENTICATE, WWW_AUTHENTICATE,
+    ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, COOKIE, HOST,
+    LOCATION, PROXY_AUTHENTICATE, SET_COOKIE, WWW_AUTHENTICATE,
 };
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{body::Body, Router};
+use axum::routing::{get, post};
+use axum::{body::Body, Json, Router};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::Engine as _;
 use bytes::Bytes;
+use ring::hmac;
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -25,6 +30,10 @@ use crate::config::Config;
 use crate::html::HtmlAssets;
 use crate::tls::{build_acceptor, ConnInfo, TlsListener};
 use crate::ws;
+
+const LOGIN_TOKEN_VERSION: &str = "v1";
+const REMEMBER_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const SESSION_TTL_SECS: u64 = 12 * 60 * 60;
 
 pub struct AppState {
     pub config: Arc<Config>,
@@ -64,6 +73,8 @@ fn build_router(state: Arc<AppState>) -> Router {
     let mut app = Router::new()
         .route(&state.config.endpoints.index, get(index_handler))
         .route(&state.config.endpoints.token, get(token_handler))
+        .route(&state.config.endpoints.login, post(login_handler))
+        .route(&state.config.endpoints.logout, post(logout_handler))
         .route(&state.config.endpoints.ws, get(ws::handler));
 
     if !state.config.endpoints.parent.is_empty() {
@@ -101,14 +112,40 @@ async fn auth_middleware(
         }
     }
 
+    if is_login_public(&state.config, &request) {
+        return next.run(request).await;
+    }
+
     match check_auth(&state.config, request.headers()) {
         Ok(user) => {
             request.extensions_mut().insert(AuthUser { user });
             next.run(request).await
         }
-        Err(AuthFailure::Unauthorized) => unauthorized(false),
-        Err(AuthFailure::ProxyUnauthorized) => unauthorized(true),
+        Err(failure) => unauthorized(&state.config, &request, failure),
     }
+}
+
+fn is_login_public(config: &Config, request: &Request) -> bool {
+    if config.credential.is_none() || config.auth_header.is_some() {
+        return false;
+    }
+
+    let path = request.uri().path();
+    let method = request.method();
+    if path == config.endpoints.login {
+        return config.index.is_none() && method == Method::POST;
+    }
+
+    if !config.endpoints.parent.is_empty()
+        && path == config.endpoints.parent
+        && (method == Method::GET || method == Method::HEAD)
+    {
+        return true;
+    }
+
+    config.index.is_none()
+        && path == config.endpoints.index
+        && (method == Method::GET || method == Method::HEAD)
 }
 
 enum AuthFailure {
@@ -128,6 +165,13 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
     }
 
     if let Some(credential) = &config.credential {
+        let cookie_name = login_cookie_name(config);
+        if cookie_value(headers, &cookie_name)
+            .is_some_and(|token| verify_login_token(credential, token))
+        {
+            return Ok(None);
+        }
+
         let value = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -144,16 +188,33 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
     Ok(None)
 }
 
-fn unauthorized(proxy: bool) -> Response {
-    let (header, status) = if proxy {
-        (
-            PROXY_AUTHENTICATE,
+fn unauthorized(config: &Config, request: &Request, failure: AuthFailure) -> Response {
+    let mut response = match failure {
+        AuthFailure::ProxyUnauthorized => (
             StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+            [(PROXY_AUTHENTICATE, "Basic realm=\"ttyd\"")],
         )
-    } else {
-        (WWW_AUTHENTICATE, StatusCode::UNAUTHORIZED)
+            .into_response(),
+        AuthFailure::Unauthorized => {
+            let path = request.uri().path();
+            let challenge = path != config.endpoints.token
+                && path != config.endpoints.ws
+                && path != config.endpoints.logout;
+            if challenge {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(WWW_AUTHENTICATE, "Basic realm=\"ttyd\"")],
+                )
+                    .into_response()
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
     };
-    (status, [(header, "Basic realm=\"ttyd\"")]).into_response()
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn redirect_to_https(request: &Request) -> Response {
@@ -216,18 +277,224 @@ async fn index_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+    #[serde(default)]
+    remember: bool,
+}
+
+async fn login_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    connect: ConnectInfo<ConnInfo>,
+    Json(login): Json<LoginRequest>,
+) -> Response {
+    log_http(&state.config.endpoints.login, &connect);
+
+    if state.config.auth_header.is_some() || state.config.index.is_some() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(credential) = state.config.credential.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if !credentials_match(credential, &login.username, &login.password) {
+        warn!("login failed from {}", peer_string(&connect));
+        return json_error(StatusCode::UNAUTHORIZED, "invalid username or password");
+    }
+
+    let ttl = if login.remember {
+        REMEMBER_TTL_SECS
+    } else {
+        SESSION_TTL_SECS
+    };
+    let Some(token) = create_login_token(credential, ttl) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let cookie = build_login_cookie(&state.config, &headers, &token, login.remember);
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !attach_cookie(&mut response, &cookie) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    response
+}
+
+async fn logout_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    connect: ConnectInfo<ConnInfo>,
+) -> Response {
+    log_http(&state.config.endpoints.logout, &connect);
+
+    let cookie = build_logout_cookie(&state.config, &headers);
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !attach_cookie(&mut response, &cookie) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    response
+}
+
 async fn token_handler(
     State(state): State<Arc<AppState>>,
     connect: ConnectInfo<ConnInfo>,
 ) -> Response {
     log_http(&state.config.endpoints.token, &connect);
     let credential = state.config.credential.as_deref().unwrap_or("");
-    let body = format!("{{\"token\": \"{credential}\"}}");
+    let login = state.config.credential.is_some()
+        && state.config.auth_header.is_none()
+        && state.config.index.is_none();
+    let body = serde_json::json!({
+        "token": credential,
+        "login": login,
+    })
+    .to_string();
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/json;charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn json_error(status: StatusCode, message: &str) -> Response {
+    let body = serde_json::json!({ "error": message }).to_string();
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json;charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn credentials_match(credential: &str, username: &str, password: &str) -> bool {
+    let supplied = STANDARD.encode(format!("{username}:{password}"));
+    supplied == credential
+}
+
+fn create_login_token(credential: &str, ttl_secs: u64) -> Option<String> {
+    let expires = unix_now()?.saturating_add(ttl_secs);
+    let payload = format!("{LOGIN_TOKEN_VERSION}.{expires}");
+    let key = hmac::Key::new(hmac::HMAC_SHA256, credential.as_bytes());
+    let signature = hmac::sign(&key, payload.as_bytes());
+    Some(format!(
+        "{payload}.{}",
+        URL_SAFE_NO_PAD.encode(signature.as_ref())
+    ))
+}
+
+fn verify_login_token(credential: &str, token: &str) -> bool {
+    let mut parts = token.split('.');
+    let Some(version) = parts.next() else {
+        return false;
+    };
+    let Some(expires) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(signature) = parts
+        .next()
+        .and_then(|value| URL_SAFE_NO_PAD.decode(value).ok())
+    else {
+        return false;
+    };
+    if parts.next().is_some() || version != LOGIN_TOKEN_VERSION {
+        return false;
+    }
+    let Some(now) = unix_now() else {
+        return false;
+    };
+    if now >= expires {
+        return false;
+    }
+
+    let payload = format!("{LOGIN_TOKEN_VERSION}.{expires}");
+    let key = hmac::Key::new(hmac::HMAC_SHA256, credential.as_bytes());
+    hmac::verify(&key, payload.as_bytes(), &signature).is_ok()
+}
+
+fn unix_now() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn login_cookie_name(config: &Config) -> String {
+    format!("ttyd_auth_{}", config.port)
+}
+
+fn build_login_cookie(config: &Config, headers: &HeaderMap, token: &str, remember: bool) -> String {
+    let mut cookie = format!(
+        "{}={}; Path={}; HttpOnly; SameSite=Lax",
+        login_cookie_name(config),
+        token,
+        config.endpoints.cookie_path()
+    );
+    if remember {
+        cookie.push_str(&format!("; Max-Age={REMEMBER_TTL_SECS}"));
+    }
+    if is_secure_request(config, headers) {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn build_logout_cookie(config: &Config, headers: &HeaderMap) -> String {
+    let mut cookie = format!(
+        "{}=; Path={}; HttpOnly; SameSite=Lax; Max-Age=0; \
+         Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        login_cookie_name(config),
+        config.endpoints.cookie_path()
+    );
+    if is_secure_request(config, headers) {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn is_secure_request(config: &Config, headers: &HeaderMap) -> bool {
+    if config.ssl {
+        return true;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .next()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+        })
+}
+
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(key, value)| (key == name).then_some(value))
+}
+
+fn attach_cookie(response: &mut Response, cookie: &str) -> bool {
+    match HeaderValue::from_str(cookie) {
+        Ok(value) => {
+            response.headers_mut().insert(SET_COOKIE, value);
+            true
+        }
+        Err(error) => {
+            warn!("failed to build Set-Cookie header: {error}");
+            false
+        }
+    }
 }
 
 async fn redirect_handler(
@@ -529,8 +796,11 @@ fn init_logging(debug_level: i32) {
 fn log_config(config: &Config) {
     info!("ttyd version {}", crate::config::VERSION);
     info!("tty configuration:");
-    if config.credential.is_some() {
+    if config.credential.is_some() && config.auth_header.is_none() {
         info!("  basic auth: enabled");
+        if config.index.is_none() {
+            info!("  web login: enabled");
+        }
     }
     info!("  start command: {}", config.command_string);
     info!("  close signal: {} ({})", config.signal_name, config.signal);
@@ -540,6 +810,8 @@ fn log_config(config: &Config) {
         info!("  base-path: {}", config.endpoints.parent);
         info!("  index    : {}", config.endpoints.index);
         info!("  token    : {}", config.endpoints.token);
+        info!("  login    : {}", config.endpoints.login);
+        info!("  logout   : {}", config.endpoints.logout);
         info!("  websocket: {}", config.endpoints.ws);
     }
     if let Some(auth_header) = &config.auth_header {
@@ -582,8 +854,11 @@ mod protocol_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use axum::http::header::{AUTHORIZATION, COOKIE};
+    use axum::http::HeaderMap;
     use base64::Engine;
     use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::Message;
@@ -680,6 +955,18 @@ mod protocol_tests {
     }
 
     async fn connect(addr: SocketAddr, credential: Option<&str>) -> Client {
+        connect_request(addr, credential, None).await
+    }
+
+    async fn connect_with_cookie(addr: SocketAddr, cookie: &str) -> Client {
+        connect_request(addr, None, Some(cookie)).await
+    }
+
+    async fn connect_request(
+        addr: SocketAddr,
+        credential: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Client {
         let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
         request
             .headers_mut()
@@ -690,6 +977,11 @@ mod protocol_tests {
                 format!("Basic {credential}").parse().unwrap(),
             );
         }
+        if let Some(cookie) = cookie {
+            request
+                .headers_mut()
+                .insert("Cookie", cookie.parse().unwrap());
+        }
         let (socket, _) = tokio::time::timeout(
             Duration::from_secs(5),
             tokio_tungstenite::connect_async(request),
@@ -698,6 +990,53 @@ mod protocol_tests {
         .expect("connect timed out")
         .expect("websocket handshake failed");
         socket
+    }
+
+    async fn http_request(addr: SocketAddr, request: String) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+            .await
+            .expect("http request timed out")
+            .expect("failed to read http response");
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    fn http_get(addr: SocketAddr, path: &str, cookie: Option<&str>) -> String {
+        let mut request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+        if let Some(cookie) = cookie {
+            request.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
+        request.push_str("\r\n");
+        request
+    }
+
+    fn http_post_json(addr: SocketAddr, path: &str, body: &str, cookie: Option<&str>) -> String {
+        let mut request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        if let Some(cookie) = cookie {
+            request.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(body);
+        request
+    }
+
+    fn header_value<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+        response.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
+    fn response_body(response: &str) -> &str {
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or("")
     }
 
     async fn read_initial(socket: &mut Client) -> Vec<u8> {
@@ -912,6 +1251,239 @@ mod protocol_tests {
         let end = finish(&mut socket, None).await;
         shutdown.cancel();
         assert_eq!(end.close_code, CLOSE_POLICY);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn login_sets_a_cookie_that_authenticates_http_and_websocket() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let mut config = test_config(shell("exit 0"), "exit");
+        config.credential = Some(credential.clone());
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let body = serde_json::json!({"username": "user", "password": "pass", "remember": true})
+            .to_string();
+        let response = http_request(addr, http_post_json(addr, "/login", &body, None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "response was {response}"
+        );
+        let set_cookie = header_value(&response, "set-cookie").expect("set-cookie missing");
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+        assert!(set_cookie.contains("Path=/"));
+        assert!(set_cookie.contains("Max-Age=2592000"));
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+        let response = http_request(addr, http_get(addr, "/token", Some(&cookie))).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        let token_body = response_body(&response);
+        assert!(token_body.contains("\"token\""), "body was {token_body}");
+        assert!(
+            token_body.contains("\"login\":true"),
+            "body was {token_body}"
+        );
+
+        let mut socket = connect_with_cookie(addr, &cookie).await;
+        read_initial(&mut socket).await;
+        socket.send(init_message(&credential)).await.unwrap();
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn login_rejects_bad_credentials_without_a_browser_challenge() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let mut config = test_config(shell("exit 0"), "exit");
+        config.credential = Some(credential);
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let body = serde_json::json!({"username": "user", "password": "wrong"}).to_string();
+        let response = http_request(addr, http_post_json(addr, "/login", &body, None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "set-cookie").is_none());
+        assert!(header_value(&response, "www-authenticate").is_none());
+
+        let response = http_request(addr, http_get(addr, "/token", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "www-authenticate").is_none());
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn base_path_serves_login_and_scopes_the_cookie() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let mut config = test_config(shell("exit 0"), "exit");
+        config.credential = Some(credential);
+        config.endpoints = Endpoints::from_base_path(Some("/mounted/here"));
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let response = http_request(addr, http_get(addr, "/mounted/here", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 302"),
+            "response was {response}"
+        );
+        assert_eq!(header_value(&response, "location"), Some("/mounted/here/"));
+
+        let response = http_request(addr, http_get(addr, "/mounted/here/", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+
+        let response = http_request(addr, http_get(addr, "/mounted/here/token", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "www-authenticate").is_none());
+
+        let body = serde_json::json!({"username": "user", "password": "pass", "remember": true})
+            .to_string();
+        let response = http_request(
+            addr,
+            http_post_json(addr, "/mounted/here/login", &body, None),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "response was {response}"
+        );
+        let set_cookie = header_value(&response, "set-cookie").expect("set-cookie missing");
+        assert!(set_cookie.contains("Path=/mounted/here"));
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+        let response =
+            http_request(addr, http_get(addr, "/mounted/here/token", Some(&cookie))).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_index_keeps_basic_auth_only() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let index = std::env::temp_dir().join(format!(
+            "ttyd-custom-index-{}-{}.html",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&index, "<html>custom-index</html>").unwrap();
+
+        let mut config = test_config(shell("exit 0"), "exit");
+        config.credential = Some(credential.clone());
+        config.index = Some(index.clone());
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let response = http_request(addr, http_get(addr, "/", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "www-authenticate").is_some());
+
+        let response = http_request(
+            addr,
+            format!(
+                "GET / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic {credential}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        assert!(response_body(&response).contains("custom-index"));
+
+        let body = serde_json::json!({"username": "user", "password": "pass"}).to_string();
+        let response = http_request(
+            addr,
+            format!(
+                "POST /login HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic {credential}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "set-cookie").is_none());
+
+        shutdown.cancel();
+        let _ = std::fs::remove_file(index);
+    }
+
+    #[test]
+    fn login_tokens_are_signed_and_expire() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let token = super::create_login_token(&credential, 60).unwrap();
+        assert!(super::verify_login_token(&credential, &token));
+        assert!(!super::verify_login_token("other-credential", &token));
+
+        let expired = super::create_login_token(&credential, 0).unwrap();
+        assert!(!super::verify_login_token(&credential, &expired));
+
+        let tampered = token.replacen(super::LOGIN_TOKEN_VERSION, "v2", 1);
+        assert!(!super::verify_login_token(&credential, &tampered));
+        assert!(!super::verify_login_token(&credential, ""));
+    }
+
+    #[test]
+    fn login_credentials_and_cookie_are_validated() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        assert!(super::credentials_match(&credential, "user", "pass"));
+        assert!(!super::credentials_match(&credential, "user", "wrong"));
+
+        let mut config = test_config(Vec::new(), "");
+        config.credential = Some(credential.clone());
+        let token = super::create_login_token(&credential, 60).unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            format!("{}={token}", super::login_cookie_name(&config))
+                .parse()
+                .unwrap(),
+        );
+        assert!(super::check_auth(&config, &headers).is_ok());
+
+        headers.remove(COOKIE);
+        headers.insert(
+            AUTHORIZATION,
+            format!("Basic {credential}").parse().unwrap(),
+        );
+        assert!(super::check_auth(&config, &headers).is_ok());
+
+        let cookie = super::build_login_cookie(&config, &HeaderMap::new(), &token, true);
+        assert!(cookie.contains("Path=/;"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age=2592000"));
+        assert!(!cookie.contains("Secure"));
+
+        let session_cookie = super::build_login_cookie(&config, &HeaderMap::new(), &token, false);
+        assert!(!session_cookie.contains("Max-Age"));
+
+        let logout_cookie = super::build_logout_cookie(&config, &HeaderMap::new());
+        assert!(logout_cookie.contains("Max-Age=0"));
+
+        let mut secure_headers = HeaderMap::new();
+        secure_headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let cookie = super::build_login_cookie(&config, &secure_headers, &token, true);
+        assert!(cookie.contains("; Secure"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

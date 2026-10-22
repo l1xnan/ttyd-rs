@@ -1546,6 +1546,7 @@ dependencies = [
  "libc",
  "nix 0.30.1",
  "portable-pty",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",

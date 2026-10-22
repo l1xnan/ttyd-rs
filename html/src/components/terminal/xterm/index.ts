@@ -66,6 +66,7 @@ export interface XtermOptions {
     flowControl: FlowControl;
     clientOptions: ClientOptions;
     termOptions: ITerminalOptions;
+    onAuthRequired?: () => void;
 }
 
 function toDisposable(f: () => void): IDisposable {
@@ -117,6 +118,18 @@ export class Xterm {
     }
 
     @bind
+    public close() {
+        this.reconnect = false;
+        this.doReconnect = false;
+        const socket = this.socket;
+        this.socket = undefined;
+        if (socket && socket.readyState < WebSocket.CLOSING) {
+            socket.close();
+        }
+        this.dispose();
+    }
+
+    @bind
     private register<T extends IDisposable>(d: T): T {
         this.disposables.push(d);
         return d;
@@ -128,15 +141,28 @@ export class Xterm {
     }
 
     @bind
-    public async refreshToken() {
+    public async refreshToken(): Promise<boolean> {
         try {
-            const resp = await fetch(this.options.tokenUrl);
-            if (resp.ok) {
-                const json = await resp.json();
-                this.token = json.token;
+            const resp = await fetch(this.options.tokenUrl, {
+                cache: 'no-store',
+                credentials: 'same-origin',
+            });
+            if (resp.status === 401) {
+                this.options.onAuthRequired?.();
+                return false;
             }
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const json = await resp.json();
+            if (typeof json?.token !== 'string') {
+                throw new Error('invalid token response');
+            }
+            this.token = json.token;
+            return true;
         } catch (e) {
             console.error(`[ttyd] fetch ${this.options.tokenUrl}: `, e);
+            return false;
         }
     }
 
@@ -288,7 +314,9 @@ export class Xterm {
         // 1000: CLOSE_NORMAL
         if (event.code !== 1000 && doReconnect) {
             overlayAddon.showOverlay('Reconnecting...');
-            refreshToken().then(connect);
+            refreshToken().then(ok => {
+                if (ok) connect();
+            });
         } else if (this.closeOnDisconnect) {
             window.close();
         } else {
@@ -298,7 +326,9 @@ export class Xterm {
                 if (event.key === 'Enter') {
                     keyDispose.dispose();
                     overlayAddon.showOverlay('Reconnecting...');
-                    refreshToken().then(connect);
+                    refreshToken().then(ok => {
+                        if (ok) connect();
+                    });
                 }
             });
             overlayAddon.showOverlay('Press ⏎ to Reconnect');

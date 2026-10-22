@@ -65,6 +65,14 @@ export default defineConfig({
         port: 9000,
         strictPort: true,
         proxy: {
+            '/login': {
+                target: 'http://127.0.0.1:7681',
+                changeOrigin: true,
+            },
+            '/logout': {
+                target: 'http://127.0.0.1:7681',
+                changeOrigin: true,
+            },
             '/token': {
                 target: 'http://127.0.0.1:7681',
                 changeOrigin: true,

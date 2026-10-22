@@ -8,6 +8,8 @@ pub struct Endpoints {
     pub ws: String,
     pub index: String,
     pub token: String,
+    pub login: String,
+    pub logout: String,
     pub parent: String,
 }
 
@@ -19,6 +21,8 @@ impl Endpoints {
                 ws: "/ws".to_owned(),
                 index: "/".to_owned(),
                 token: "/token".to_owned(),
+                login: "/login".to_owned(),
+                logout: "/logout".to_owned(),
                 parent: String::new(),
             };
         }
@@ -27,7 +31,17 @@ impl Endpoints {
             ws: format!("{base}/ws"),
             index: format!("{base}/"),
             token: format!("{base}/token"),
+            login: format!("{base}/login"),
+            logout: format!("{base}/logout"),
             parent: base.to_owned(),
+        }
+    }
+
+    pub fn cookie_path(&self) -> &str {
+        if self.parent.is_empty() {
+            "/"
+        } else {
+            &self.parent
         }
     }
 }
@@ -173,6 +187,9 @@ mod tests {
         assert_eq!(endpoints.ws, "/ws");
         assert_eq!(endpoints.index, "/");
         assert_eq!(endpoints.token, "/token");
+        assert_eq!(endpoints.login, "/login");
+        assert_eq!(endpoints.logout, "/logout");
+        assert_eq!(endpoints.cookie_path(), "/");
         assert!(endpoints.parent.is_empty());
     }
 
@@ -182,6 +199,9 @@ mod tests {
         assert_eq!(endpoints.ws, "/mounted/here/ws");
         assert_eq!(endpoints.index, "/mounted/here/");
         assert_eq!(endpoints.token, "/mounted/here/token");
+        assert_eq!(endpoints.login, "/mounted/here/login");
+        assert_eq!(endpoints.logout, "/mounted/here/logout");
+        assert_eq!(endpoints.cookie_path(), "/mounted/here");
         assert_eq!(endpoints.parent, "/mounted/here");
     }
 

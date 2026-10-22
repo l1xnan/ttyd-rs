@@ -16,7 +16,7 @@ ttyd 1 "September 2016" ttyd "User Manual"
   - Sixel image output support
   - TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
   - Run any custom command with options
-  - Basic authentication and reverse-proxy header authentication
+  - Web login with optional 30-day "remember me", Basic authentication, and reverse-proxy header authentication
   - Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, `-s` does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
 # OPTIONS
@@ -30,7 +30,7 @@ ttyd 1 "September 2016" ttyd "User Manual"
       User owner of the UNIX domain socket file, when enabled (eg: user:group)
 
   -c, --credential USER[:PASSWORD]
-      Credential for Basic Authentication (format: username:password)
+      Credential for web login and Basic authentication (format: username:password)
 
   -H, --auth-header <name>
       HTTP Header name for auth proxy, this will configure ttyd to let a HTTP reverse proxy handle authentication
@@ -145,6 +145,21 @@ to try the example options above, run:
 ```bash
 ttyd -t cursorStyle=bar -t lineHeight=1.5 -t 'theme={"background": "green"}' bash
 ```
+
+# AUTHENTICATION
+  Use `-c username:password` to enable the built-in web login page. The same credential also continues to work with HTTP Basic authentication:
+
+```bash
+ttyd -c user:pass bash
+```
+
+  The built-in login page is shown when authentication is required. "Keep me signed in" is checked by default and keeps the login for 30 days in the current browser. When unchecked, the login uses a session cookie and expires after 12 hours or when the browser closes.
+
+  Remembered logins use an HMAC-signed, `HttpOnly` cookie. They survive a ttyd restart as long as the `-c` credential is unchanged; changing the credential invalidates existing remembered logins. Logout clears the cookie in the current browser; because sessions are stateless, a copied cookie remains valid until it expires.
+
+  The `-H name` option delegates authentication to a reverse proxy and disables the local login page. A custom page passed with `-I` keeps its existing behavior and is served only after authentication. Browser requests to `/token` and `/ws` use the login cookie automatically; API clients can still use `curl -u user:pass`.
+
+  With `-b /mounted/here`, the login, logout, token, and WebSocket routes and the cookie `Path` are scoped under `/mounted/here`. When TLS terminates at a reverse proxy, send `X-Forwarded-Proto: https` so the cookie is marked `Secure`.
 
 # EXAMPLES
   ttyd starts web server at port 7681 by default, you can use the -p option to change it, the command will be started with arguments as options. For example, run:
