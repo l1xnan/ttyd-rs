@@ -21,15 +21,15 @@
   "engines": {
     "node": ">=22.12"
   },
-  "packageManager": "pnpm@12.5.1",
+  "packageManager": "pnpm@12.15.0",
   "devDependencies": {
     "@preact/preset-vite": "^2.10.6",
     "@types/file-saver": "^2.0.7",
     "@types/node": "^26.6.5",
-    "oxfmt": "^0.74.0",
-    "oxlint": "^1.89.0",
-    "rollup": "^4.64.12",
-    "sass": "^1.106.0",
+    "oxfmt": "^0.75.0",
+    "oxlint": "^1.90.0",
+    "rollup": "^4.65.1",
+    "sass": "^1.106.1",
     "typescript": "~7.0.2",
     "vite": "^8.3.5",
     "vite-plugin-singlefile": "^2.3.4"
@@ -44,7 +44,7 @@
     "@xterm/xterm": "^6.0.0",
     "decko": "^1.2.0",
     "file-saver": "^2.0.5",
-    "preact": "^11.0.1",
+    "preact": "^11.1.0",
     "trzsz": "1.1.6",
     "zmodem-ts": "^1.0.8"
   }
