@@ -59,6 +59,7 @@ const flowControl = {
 interface TokenResponse {
     token: string;
     login?: boolean;
+    sessionTimeout?: number;
 }
 
 type Status = 'checking' | 'login' | 'terminal' | 'error';
@@ -68,6 +69,7 @@ interface State {
     loginEnabled: boolean;
     error: string;
     loggingOut: boolean;
+    sessionTimeout: number;
 }
 
 export class App extends Component<{}, State> {
@@ -76,6 +78,7 @@ export class App extends Component<{}, State> {
         loginEnabled: false,
         error: '',
         loggingOut: false,
+        sessionTimeout: 0,
     };
 
     componentDidMount() {
@@ -107,6 +110,10 @@ export class App extends Component<{}, State> {
                 status: 'terminal',
                 loginEnabled: data.login === true,
                 error: '',
+                sessionTimeout:
+                    typeof data.sessionTimeout === 'number' && data.sessionTimeout >= 0
+                        ? Math.min(Math.trunc(data.sessionTimeout), 3600)
+                        : 0,
             });
         } catch (error) {
             console.error(`[ttyd] fetch ${tokenUrl}: `, error);
@@ -156,7 +163,7 @@ export class App extends Component<{}, State> {
         }
     }
 
-    render(_: {}, { status, loginEnabled, error, loggingOut }: State) {
+    render(_: {}, { status, loginEnabled, error, loggingOut, sessionTimeout }: State) {
         if (status === 'checking') {
             return (
                 <main class="login-page">
@@ -204,6 +211,7 @@ export class App extends Component<{}, State> {
                     clientOptions={clientOptions}
                     termOptions={termOptions}
                     flowControl={flowControl}
+                    sessionTimeout={sessionTimeout}
                     onAuthRequired={this.handleAuthRequired}
                 />
                 {loginEnabled && (

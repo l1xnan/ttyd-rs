@@ -20,6 +20,7 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 - TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
 - Run any custom command with options
 - Web login with optional 30-day "remember me", Basic authentication, and reverse-proxy header authentication
+- Resumable sessions: reloading a tab reattaches to the same PTY with recent output replayed
 - IPv4, IPv6, TCP and UNIX domain sockets
 - Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, `-s` does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
@@ -120,6 +121,8 @@ OPTIONS:
     -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)
     -P, --ping-interval     Websocket ping interval(sec) (default: 5)
     -f, --srv-buf-size      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)
+        --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)
+        --session-buffer-size  Bytes of output retained for session replay (default: 4194304)
     -6, --ipv6              Enable IPv6 support
     -S, --ssl               Enable SSL
     -C, --ssl-cert          SSL certificate file path
@@ -159,6 +162,23 @@ ttyd -c user:pass bash
   the cookie `Path` are scoped under `/mounted/here`. When TLS terminates at a
   reverse proxy, send `X-Forwarded-Proto: https` so the cookie is marked
   `Secure`.
+
+## Session persistence
+
+By default a detached PTY is kept for 30 seconds. Reloading the page reattaches
+to the same shell, editor, or running command, and up to 4 MiB of recent output
+is replayed into the terminal. The session id is stored in `sessionStorage`, so
+each tab has its own session and opening a new tab starts a fresh command.
+
+- `--session-timeout <seconds>` changes how long a detached session is kept.
+  `0` disables persistence and terminates the command immediately after the last
+  client disconnects.
+- `--session-buffer-size <bytes>` changes the in-memory replay buffer size.
+- Add `?sessionTimeout=N` to the page URL to override the timeout for that tab
+  (maximum 3600 seconds). The override cannot re-enable persistence when the
+  server was started with `--session-timeout 0`.
+- `-q` / `--exit-no-conn` and `-o` / `--once` keep their existing semantics and
+  may exit before a refreshed page can reconnect.
 
 ## Browser Support
 

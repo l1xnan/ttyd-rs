@@ -1,11 +1,13 @@
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
-use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc as tokio_mpsc, watch};
 
 use crate::config::Config;
 
@@ -15,8 +17,32 @@ pub const INPUT_QUEUE_CAPACITY: usize = 64;
 /// Largest `0` payload accepted from one WebSocket frame.
 pub const MAX_INPUT_FRAME: usize = 256 * 1024;
 
-pub enum OutputEvent {
-    Data(Vec<u8>),
+/// Default amount of PTY output kept for replay when a client reconnects.
+pub const DEFAULT_OUTPUT_BUFFER_LIMIT: usize = 4 * 1024 * 1024;
+
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStatus {
+    Running,
+    Exited(i32),
+}
+
+#[derive(Clone, Debug)]
+pub struct OutputFrame {
+    pub offset: u64,
+    pub data: Bytes,
+}
+
+impl OutputFrame {
+    pub fn end(&self) -> u64 {
+        self.offset.saturating_add(self.data.len() as u64)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionEvent {
+    Data(OutputFrame),
     Eof,
 }
 
@@ -25,15 +51,65 @@ pub enum InputReject {
     Closed,
 }
 
+/// Raw output history kept for reconnecting clients.
+struct OutputRing {
+    chunks: VecDeque<Bytes>,
+    bytes: usize,
+    start: u64,
+    limit: usize,
+}
+
+impl OutputRing {
+    fn new(limit: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            bytes: 0,
+            start: 0,
+            limit: limit.max(1),
+        }
+    }
+
+    fn end(&self) -> u64 {
+        self.start.saturating_add(self.bytes as u64)
+    }
+
+    fn push(&mut self, data: Bytes) -> OutputFrame {
+        let offset = self.end();
+        self.bytes = self.bytes.saturating_add(data.len());
+        self.chunks.push_back(data.clone());
+
+        // Keep the buffer bounded, but always retain at least one chunk so a
+        // single oversized read can still be replayed.
+        while self.bytes > self.limit && self.chunks.len() > 1 {
+            let Some(front) = self.chunks.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(front.len());
+            self.start = self.start.saturating_add(front.len() as u64);
+        }
+
+        OutputFrame { offset, data }
+    }
+
+    fn snapshot(&self) -> (Vec<u8>, u64) {
+        let mut output = Vec::with_capacity(self.bytes);
+        for chunk in &self.chunks {
+            output.extend_from_slice(chunk);
+        }
+        (output, self.end())
+    }
+}
+
 pub struct PtySession {
-    master: Box<dyn MasterPty + Send>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     pid: Option<u32>,
     #[cfg(unix)]
     pgid: Option<i32>,
     pub input_tx: tokio_mpsc::Sender<Vec<u8>>,
-    pub output_rx: tokio_mpsc::Receiver<OutputEvent>,
-    pub exit_rx: oneshot::Receiver<i32>,
+    events: broadcast::Sender<SessionEvent>,
+    ring: Arc<Mutex<OutputRing>>,
+    status: watch::Sender<SessionStatus>,
     exited: Arc<AtomicBool>,
     kill_signal: i32,
 }
@@ -95,12 +171,15 @@ impl PtySession {
             .context("failed to get PTY writer")?;
 
         let (input_tx, mut input_rx) = tokio_mpsc::channel::<Vec<u8>>(INPUT_QUEUE_CAPACITY);
-        let (output_tx, output_rx) = tokio_mpsc::channel::<OutputEvent>(4);
-        let (exit_tx, exit_rx) = oneshot::channel::<i32>();
+        let (events, _) = broadcast::channel::<SessionEvent>(EVENT_CHANNEL_CAPACITY);
+        let (status, _) = watch::channel(SessionStatus::Running);
+        let ring = Arc::new(Mutex::new(OutputRing::new(config.session_buffer_size)));
         let exited = Arc::new(AtomicBool::new(false));
         let waiter_exited = exited.clone();
         let read_size = config.serv_buf_size.max(1);
 
+        let reader_ring = ring.clone();
+        let reader_events = events.clone();
         std::thread::Builder::new()
             .name("ttyd-pty-reader".to_owned())
             .spawn(move || {
@@ -109,12 +188,13 @@ impl PtySession {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(count) => {
-                            if output_tx
-                                .blocking_send(OutputEvent::Data(buffer[..count].to_vec()))
-                                .is_err()
-                            {
-                                return;
-                            }
+                            let frame = {
+                                let mut ring = reader_ring
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                ring.push(Bytes::copy_from_slice(&buffer[..count]))
+                            };
+                            let _ = reader_events.send(SessionEvent::Data(frame));
                         }
                         Err(error) => {
                             if error.kind() != std::io::ErrorKind::Interrupted {
@@ -123,7 +203,7 @@ impl PtySession {
                         }
                     }
                 }
-                let _ = output_tx.blocking_send(OutputEvent::Eof);
+                let _ = reader_events.send(SessionEvent::Eof);
             })
             .context("failed to start PTY reader thread")?;
 
@@ -138,6 +218,7 @@ impl PtySession {
             })
             .context("failed to start PTY writer thread")?;
 
+        let waiter_status = status.clone();
         std::thread::Builder::new()
             .name("ttyd-pty-waiter".to_owned())
             .spawn(move || {
@@ -146,19 +227,20 @@ impl PtySession {
                     Err(_) => -1,
                 };
                 waiter_exited.store(true, Ordering::SeqCst);
-                let _ = exit_tx.send(code);
+                let _ = waiter_status.send(SessionStatus::Exited(code));
             })
             .context("failed to start PTY wait thread")?;
 
         Ok(Self {
-            master: pair.master,
+            master: Mutex::new(pair.master),
             killer: Arc::new(Mutex::new(killer)),
             pid,
             #[cfg(unix)]
             pgid,
             input_tx,
-            output_rx,
-            exit_rx,
+            events,
+            ring,
+            status,
             exited,
             kill_signal: config.signal,
         })
@@ -166,6 +248,25 @@ impl PtySession {
 
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn status(&self) -> watch::Receiver<SessionStatus> {
+        self.status.subscribe()
+    }
+
+    pub fn snapshot(&self) -> (Vec<u8>, u64) {
+        self.ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot()
+    }
+
+    pub fn is_exited(&self) -> bool {
+        self.exited.load(Ordering::SeqCst)
     }
 
     pub fn try_write(&self, data: Vec<u8>) -> Result<(), InputReject> {
@@ -180,7 +281,10 @@ impl PtySession {
         if columns == 0 || rows == 0 {
             return;
         }
-        let _ = self.master.resize(PtySize {
+        let Ok(master) = self.master.lock() else {
+            return;
+        };
+        let _ = master.resize(PtySize {
             rows,
             cols: columns,
             pixel_width: 0,
@@ -211,6 +315,10 @@ impl PtySession {
         if let Ok(mut killer) = self.killer.lock() {
             let _ = killer.kill();
         }
+    }
+
+    pub fn kill_default(&self) {
+        self.kill(self.kill_signal);
     }
 }
 
@@ -256,6 +364,8 @@ mod tests {
             endpoints: crate::config::Endpoints::from_base_path(None),
             ping_interval: 0,
             serv_buf_size: 4096,
+            session_timeout: 30,
+            session_buffer_size: DEFAULT_OUTPUT_BUFFER_LIMIT,
             ipv6: false,
             ssl: false,
             ssl_cert: None,

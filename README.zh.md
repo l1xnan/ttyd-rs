@@ -20,6 +20,7 @@ ttyd 是一个简单的命令行工具，可通过 Web 共享终端。
 - 基于 [rustls](https://github.com/rustls/rustls) 的 TLS 和双向 TLS 支持
 - 可运行任意自定义命令并传递参数
 - Web 登录（可选 30 天“记住我”）、Basic 认证和反向代理请求头认证
+- 会话可恢复：刷新标签页会重新连接同一个 PTY 并回放最近的输出
 - 支持 IPv4、IPv6、TCP 和 UNIX 域套接字
 - 跨平台：Linux、macOS 和 Windows（ConPTY）。在 Windows 上，`-s` 不会传递 POSIX 信号，也不存在进程组；此时会直接终止子进程
 
@@ -112,6 +113,8 @@ cargo build --release --manifest-path rust/Cargo.toml
     -b, --base-path         反向代理请求使用的预期基础路径（例如 /mounted/here，最大长度：128）
     -P, --ping-interval     WebSocket ping 间隔（秒，默认：5）
     -f, --srv-buf-size      一次从 PTY 读取的最大字节数；较大的值可能提高吞吐量（默认：4096）
+        --session-timeout      分离后保留会话的秒数（默认：30，0 表示禁用会话保持）
+        --session-buffer-size  用于会话回放的输出缓冲字节数（默认：4194304）
     -6, --ipv6              启用 IPv6 支持
     -S, --ssl               启用 SSL
     -C, --ssl-cert          SSL 证书文件路径
@@ -137,6 +140,15 @@ ttyd -c user:pass bash
 - `-H name` 会将认证交给反向代理，并禁用本地登录页。通过 `-I` 传入的自定义页面保持原有行为，仅在认证后提供。
 - 浏览器对 `/token` 和 `/ws` 的请求会自动使用登录 Cookie。API 客户端仍可使用 `curl -u user:pass`。
 - 使用 `-b /mounted/here` 时，登录、退出、Token 和 WebSocket 路由以及 Cookie 的 `Path` 都会限定在 `/mounted/here` 下。当 TLS 在反向代理处终止时，发送 `X-Forwarded-Proto: https`，使 Cookie 带有 `Secure` 标记。
+
+## 会话保持
+
+默认情况下，客户端断开后 PTY 会保留 30 秒。刷新页面会重新连接同一个 shell、编辑器或正在运行的命令，并回放最多 4 MiB 的最近输出。会话 ID 保存在 `sessionStorage` 中，因此每个标签页拥有独立会话，新开标签页会启动新命令。
+
+- `--session-timeout <seconds>` 调整断开后保留会话的时间。设为 `0` 会禁用会话保持，并在最后一个客户端断开后立即终止命令。
+- `--session-buffer-size <bytes>` 调整内存中的输出回放缓冲大小。
+- 在页面 URL 后添加 `?sessionTimeout=N` 可覆盖当前标签页的超时时间（最大 3600 秒）。如果服务端以 `--session-timeout 0` 启动，该覆盖值无法重新启用会话保持。
+- `-q` / `--exit-no-conn` 与 `-o` / `--once` 保持原有语义，可能在刷新后的页面重连前退出。
 
 ## 浏览器支持
 

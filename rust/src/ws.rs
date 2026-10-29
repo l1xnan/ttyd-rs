@@ -8,16 +8,18 @@ use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::SinkExt;
 use serde_json::Value;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::config::hostname;
-use crate::pty::{InputReject, OutputEvent, PtySession, MAX_INPUT_FRAME};
+use crate::pty::{InputReject, PtySession, SessionEvent, SessionStatus, MAX_INPUT_FRAME};
 use crate::server::{peer_string, AppState, AuthUser};
+use crate::session::{AttachError, AttachRequest, ManagedSession, SessionManager};
 use crate::tls::ConnInfo;
 
 pub(crate) const CLOSE_NORMAL: u16 = 1000;
@@ -26,6 +28,8 @@ pub(crate) const CLOSE_POLICY: u16 = 1008;
 pub(crate) const CLOSE_TOO_LARGE: u16 = 1009;
 pub(crate) const CLOSE_ERROR: u16 = 1011;
 const PAUSE_BUFFER_LIMIT: usize = 1024 * 1024;
+const REPLAY_CHUNK_SIZE: usize = 64 * 1024;
+const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub async fn handler(
     State(state): State<Arc<AppState>>,
@@ -118,6 +122,32 @@ impl Drop for ClientGuard {
     }
 }
 
+struct Initial {
+    columns: u16,
+    rows: u16,
+    session: Option<String>,
+    session_timeout: Option<u64>,
+}
+
+/// Keeps a session attached for as long as the WebSocket lifetime, even when
+/// the function returns through an error path.
+struct Attachment {
+    manager: Arc<SessionManager>,
+    session: Arc<ManagedSession>,
+}
+
+impl Attachment {
+    fn new(manager: Arc<SessionManager>, session: Arc<ManagedSession>) -> Self {
+        Self { manager, session }
+    }
+}
+
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        self.manager.detach(&self.session);
+    }
+}
+
 fn parse_url_args(uri: &Uri) -> Vec<String> {
     form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
         .filter_map(|(key, value)| (key == "arg").then(|| value.into_owned()))
@@ -158,36 +188,69 @@ async fn run_socket(
 ) -> anyhow::Result<()> {
     send_initial(&mut socket, &state).await?;
 
-    let (columns, rows) = match wait_initial(&mut socket, &state).await? {
-        Some(size) => size,
+    let initial = match wait_initial(&mut socket, &state).await? {
+        Some(initial) => initial,
         None => return Ok(()),
     };
-    let mut columns = if columns == 0 { 80 } else { columns };
-    let mut rows = if rows == 0 { 24 } else { rows };
+    let mut columns = if initial.columns == 0 {
+        80
+    } else {
+        initial.columns
+    };
+    let mut rows = if initial.rows == 0 { 24 } else { initial.rows };
 
-    let user = user.as_deref();
-    let mut session = match PtySession::spawn(&state.config, &args, columns, rows, user) {
-        Ok(session) => session,
-        Err(error) => {
+    let timeout = state.sessions.resolve_timeout(initial.session_timeout);
+    let (session, created) = match state.sessions.attach_or_create(AttachRequest {
+        session_id: initial.session.as_deref(),
+        owner: user.as_deref(),
+        columns,
+        rows,
+        user: user.as_deref(),
+        args: &args,
+        timeout,
+    }) {
+        Ok(result) => result,
+        Err(AttachError::Forbidden) => {
+            warn!("refuse to attach to a session owned by another user");
+            close(&mut socket, CLOSE_POLICY).await;
+            return Ok(());
+        }
+        Err(AttachError::Spawn(error)) => {
             warn!("pty_spawn: {error}");
             close(&mut socket, CLOSE_ERROR).await;
             return Ok(());
         }
     };
 
-    if let Some(pid) = session.pid() {
-        info!("started process, pid: {pid}");
+    let _attachment = Attachment::new(state.sessions.clone(), session.clone());
+    send_frame(&mut socket, b'3', session.id.as_bytes()).await?;
+    session.pty.resize(columns, rows);
+
+    if created {
+        if let Some(pid) = session.pty.pid() {
+            info!("started process, pid: {pid}, session: {}", session.id);
+        }
+    } else {
+        info!("attached to session: {}", session.id);
     }
 
+    let mut events = session.pty.subscribe();
+    let mut status_rx = session.pty.status();
+    let (snapshot, mut last_offset) = session.pty.snapshot();
+    send_replay(&mut socket, &snapshot).await?;
+
     let mut paused = false;
-    let mut pending: Option<Vec<u8>> = None;
-    let mut paused_output: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut pending: Option<Bytes> = None;
+    let mut paused_output: VecDeque<Bytes> = VecDeque::new();
     let mut paused_bytes = 0usize;
     let mut held_input: Option<Vec<u8>> = None;
     let mut input_blocked = false;
     let mut eof = false;
-    let mut exit_code: Option<i32> = None;
-    let mut exited = false;
+    let mut exit_code = match *status_rx.borrow() {
+        SessionStatus::Exited(code) => Some(code),
+        SessionStatus::Running => None,
+    };
+    let mut drain_deadline = exit_code.map(|_| Instant::now() + EXIT_DRAIN_TIMEOUT);
 
     let mut ping = if state.config.ping_interval > 0 {
         // Check once a second so the ping is sent near the configured
@@ -201,7 +264,7 @@ async fn run_socket(
     };
     let mut last_activity = Instant::now();
     let mut last_ping_sent: Option<Instant> = None;
-    let input_tx = session.input_tx.clone();
+    let input_tx = session.pty.input_tx.clone();
     let ping_interval = Duration::from_secs(state.config.ping_interval);
     let ping_timeout = Duration::from_secs(state.config.ping_interval.saturating_add(7));
 
@@ -214,44 +277,37 @@ async fn run_socket(
                 }
             }
             if let Some(data) = pending.take() {
-                send_output(&mut socket, data).await?;
+                send_output(&mut socket, &data).await?;
             }
-        } else if input_blocked {
-            if let Some(data) = pending.take() {
-                if queue_paused(&mut paused_output, &mut paused_bytes, data) {
-                    warn!("closing WebSocket: paused output buffer is full");
-                    close(&mut socket, CLOSE_ERROR).await;
-                    session.kill(state.config.signal);
-                    return Ok(());
-                }
+        } else if let Some(data) = pending.take() {
+            if queue_paused(&mut paused_output, &mut paused_bytes, data) {
+                warn!("closing WebSocket: paused output buffer is full");
+                close(&mut socket, CLOSE_ERROR).await;
+                return Ok(());
             }
         }
 
-        if let Some(code) = exit_code {
-            if let Some(data) = pending.take() {
-                let _ = send_output(&mut socket, data).await;
-            }
-            while let Some(data) = paused_output.pop_front() {
-                let _ = send_output(&mut socket, data).await;
-            }
-            let _ = drain_output(&mut socket, &mut session.output_rx).await;
-            info!("process exited with code {code}");
-            exited = true;
-            // 1006 is reserved and must not be sent on the wire. Non-zero exits use 1011.
+        if exit_code.is_some()
+            && (eof || drain_deadline.is_some_and(|deadline| Instant::now() >= deadline))
+        {
+            flush_pending(
+                &mut socket,
+                &mut pending,
+                &mut paused_output,
+                &mut paused_bytes,
+            )
+            .await?;
+            let code = exit_code.unwrap_or(-1);
+            info!("session {} exited with code {code}", session.id);
             let close_code = if code == 0 { CLOSE_NORMAL } else { CLOSE_ERROR };
             close(&mut socket, close_code).await;
             break;
         }
 
-        let read_output = pending.is_none() && !eof && (!paused || input_blocked);
-
         tokio::select! {
             biased;
             _ = state.shutdown.cancelled() => {
                 close(&mut socket, CLOSE_GOING_AWAY).await;
-                if !exited {
-                    session.kill(state.config.signal);
-                }
                 return Ok(());
             }
             permit = input_tx.reserve(), if input_blocked => {
@@ -265,9 +321,6 @@ async fn run_socket(
                     Err(_) => {
                         warn!("PTY input closed");
                         close(&mut socket, CLOSE_ERROR).await;
-                        if !exited {
-                            session.kill(state.config.signal);
-                        }
                         return Ok(());
                     }
                 }
@@ -277,12 +330,9 @@ async fn run_socket(
                     Some(Ok(message)) => {
                         last_activity = Instant::now();
                         last_ping_sent = None;
-                        match handle_message(&mut session, &state, message, &mut paused, &mut columns, &mut rows).await? {
+                        match handle_message(&session.pty, &state, message, &mut paused, &mut columns, &mut rows).await? {
                             Control::Continue => {}
                             Control::Close => {
-                                if !exited {
-                                    session.kill(state.config.signal);
-                                }
                                 // The close reply is queued by tungstenite when the
                                 // peer's close frame is read. Flush it so the client
                                 // observes a clean close handshake.
@@ -296,9 +346,6 @@ async fn run_socket(
                             Control::Fail(code) => {
                                 warn!("closing WebSocket because input was rejected ({code})");
                                 close(&mut socket, code).await;
-                                if !exited {
-                                    session.kill(state.config.signal);
-                                }
                                 return Ok(());
                             }
                         }
@@ -310,29 +357,61 @@ async fn run_socket(
                     None => break,
                 }
             }
-            event = session.output_rx.recv(), if read_output => {
+            event = events.recv(), if !eof => {
                 match event {
-                    Some(OutputEvent::Data(data)) => {
+                    Ok(SessionEvent::Data(frame)) => {
+                        let frame_end = frame.end();
+                        if frame_end <= last_offset {
+                            continue;
+                        }
+                        let data = if frame.offset < last_offset {
+                            frame.data.slice((last_offset - frame.offset) as usize..)
+                        } else {
+                            frame.data
+                        };
+                        last_offset = frame_end;
                         if paused {
                             if queue_paused(&mut paused_output, &mut paused_bytes, data) {
                                 warn!("closing WebSocket: paused output buffer is full");
                                 close(&mut socket, CLOSE_ERROR).await;
-                                session.kill(state.config.signal);
                                 return Ok(());
                             }
                         } else {
                             pending = Some(data);
                         }
                     }
-                    Some(OutputEvent::Eof) | None => eof = true,
+                    Ok(SessionEvent::Eof) | Err(RecvError::Closed) => {
+                        eof = true;
+                        if exit_code.is_none() {
+                            drain_deadline = Some(Instant::now() + EXIT_DRAIN_TIMEOUT);
+                        }
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        warn!("closing WebSocket: output receiver lagged by {skipped} frames");
+                        close(&mut socket, CLOSE_ERROR).await;
+                        return Ok(());
+                    }
                 }
             }
-            code = &mut session.exit_rx, if exit_code.is_none() => {
-                if let Ok(code) = code {
-                    exit_code = Some(code);
+            status = status_rx.changed(), if exit_code.is_none() => {
+                if status.is_ok() {
+                    if let SessionStatus::Exited(code) = *status_rx.borrow() {
+                        exit_code = Some(code);
+                        drain_deadline = Some(Instant::now() + EXIT_DRAIN_TIMEOUT);
+                    }
                 } else {
                     exit_code = Some(-1);
+                    drain_deadline = Some(Instant::now() + EXIT_DRAIN_TIMEOUT);
                 }
+            }
+            _ = async {
+                match drain_deadline {
+                    Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if exit_code.is_some() || eof => {
+                exit_code.get_or_insert(-1);
+                eof = true;
             }
             _ = async {
                 match ping.as_mut() {
@@ -369,10 +448,6 @@ async fn run_socket(
         }
     }
 
-    if !exited {
-        info!("killing process");
-        session.kill(state.config.signal);
-    }
     Ok(())
 }
 
@@ -383,14 +458,30 @@ enum Control {
     Fail(u16),
 }
 
-fn queue_paused(buf: &mut VecDeque<Vec<u8>>, bytes: &mut usize, data: Vec<u8>) -> bool {
+fn queue_paused(buf: &mut VecDeque<Bytes>, bytes: &mut usize, data: Bytes) -> bool {
     *bytes = bytes.saturating_add(data.len());
     buf.push_back(data);
     *bytes > PAUSE_BUFFER_LIMIT
 }
 
+async fn flush_pending(
+    socket: &mut WebSocket,
+    pending: &mut Option<Bytes>,
+    paused_output: &mut VecDeque<Bytes>,
+    paused_bytes: &mut usize,
+) -> anyhow::Result<()> {
+    if let Some(data) = pending.take() {
+        send_output(socket, &data).await?;
+    }
+    while let Some(data) = paused_output.pop_front() {
+        *paused_bytes = paused_bytes.saturating_sub(data.len());
+        send_output(socket, &data).await?;
+    }
+    Ok(())
+}
+
 async fn handle_message(
-    session: &mut PtySession,
+    session: &PtySession,
     state: &Arc<AppState>,
     message: Message,
     paused: &mut bool,
@@ -452,7 +543,7 @@ async fn send_initial(socket: &mut WebSocket, state: &Arc<AppState>) -> anyhow::
 async fn wait_initial(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
-) -> anyhow::Result<Option<(u16, u16)>> {
+) -> anyhow::Result<Option<Initial>> {
     loop {
         let message = tokio::select! {
             _ = state.shutdown.cancelled() => {
@@ -500,35 +591,40 @@ async fn wait_initial(
 
         let columns = value.get("columns").and_then(Value::as_u64).unwrap_or(0) as u16;
         let rows = value.get("rows").and_then(Value::as_u64).unwrap_or(0) as u16;
-        return Ok(Some((columns, rows)));
+        let session = value
+            .get("session")
+            .and_then(Value::as_str)
+            .filter(|session| !session.is_empty() && session.len() <= 128)
+            .map(str::to_owned);
+        let session_timeout = value.get("sessionTimeout").and_then(Value::as_u64);
+        return Ok(Some(Initial {
+            columns,
+            rows,
+            session,
+            session_timeout,
+        }));
     }
 }
 
-async fn send_output(socket: &mut WebSocket, data: Vec<u8>) -> anyhow::Result<()> {
-    send_frame(socket, b'0', &data).await
+async fn send_replay(socket: &mut WebSocket, data: &[u8]) -> anyhow::Result<()> {
+    for chunk in data.chunks(REPLAY_CHUNK_SIZE) {
+        send_output(socket, chunk).await?;
+    }
+    Ok(())
+}
+
+async fn send_output(socket: &mut WebSocket, data: &[u8]) -> anyhow::Result<()> {
+    send_frame(socket, b'0', data).await
 }
 
 async fn send_frame(socket: &mut WebSocket, command: u8, data: &[u8]) -> anyhow::Result<()> {
-    let mut message = Vec::with_capacity(data.len() + 1);
-    message.push(command);
+    let mut message = BytesMut::with_capacity(data.len() + 1);
+    message.extend_from_slice(&[command]);
     message.extend_from_slice(data);
     socket
-        .send(Message::Binary(Bytes::from(message)))
+        .send(Message::Binary(message.freeze()))
         .await
         .map_err(anyhow::Error::from)
-}
-
-async fn drain_output(
-    socket: &mut WebSocket,
-    output_rx: &mut tokio::sync::mpsc::Receiver<OutputEvent>,
-) -> anyhow::Result<()> {
-    loop {
-        match tokio::time::timeout(Duration::from_millis(500), output_rx.recv()).await {
-            Ok(Some(OutputEvent::Data(data))) => send_output(socket, data).await?,
-            Ok(Some(OutputEvent::Eof)) | Ok(None) => return Ok(()),
-            Err(_) => return Ok(()),
-        }
-    }
 }
 
 async fn close(socket: &mut WebSocket, code: u16) {

@@ -61,6 +61,8 @@ pub struct Config {
     pub endpoints: Endpoints,
     pub ping_interval: u64,
     pub serv_buf_size: usize,
+    pub session_timeout: u64,
+    pub session_buffer_size: usize,
     pub ipv6: bool,
     pub ssl: bool,
     pub ssl_cert: Option<PathBuf>,

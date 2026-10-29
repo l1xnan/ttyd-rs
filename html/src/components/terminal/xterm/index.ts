@@ -27,6 +27,7 @@ enum Command {
     OUTPUT = '0',
     SET_WINDOW_TITLE = '1',
     SET_PREFERENCES = '2',
+    SET_SESSION = '3',
 
     // client side
     INPUT = '0',
@@ -66,8 +67,11 @@ export interface XtermOptions {
     flowControl: FlowControl;
     clientOptions: ClientOptions;
     termOptions: ITerminalOptions;
+    sessionTimeout: number;
     onAuthRequired?: () => void;
 }
+
+const SESSION_STORAGE_KEY = `ttyd.session:${window.location.pathname.replace(/[/]+$/, '') || '/'}`;
 
 function toDisposable(f: () => void): IDisposable {
     return { dispose: f };
@@ -102,6 +106,7 @@ export class Xterm {
     private reconnect = true;
     private doReconnect = true;
     private closeOnDisconnect = false;
+    private sessionId?: string;
 
     private writeFunc = (data: ArrayBuffer) => this.writeData(new Uint8Array(data));
 
@@ -168,13 +173,61 @@ export class Xterm {
 
     @bind
     private onWindowUnload(event: BeforeUnloadEvent) {
+        if (this.socket?.readyState !== WebSocket.OPEN) return undefined;
+        // With session persistence enabled, refreshing or reopening this tab
+        // restores the same PTY, so there is nothing to warn about.
+        if (this.sessionTimeout() > 0) return undefined;
+
         event.preventDefault();
-        if (this.socket?.readyState === WebSocket.OPEN) {
-            const message = 'Close terminal? this will also terminate the command.';
-            event.returnValue = message;
-            return message;
+        const message = 'Close terminal? this will also terminate the command.';
+        event.returnValue = message;
+        return message;
+    }
+
+    private storedSession(): string | undefined {
+        try {
+            const id = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+            if (id && id.length > 0 && id.length <= 128) return id;
+        } catch {
+            // sessionStorage can be unavailable in private or restricted contexts.
         }
         return undefined;
+    }
+
+    private rememberSession(id: string) {
+        if (!id || id.length > 128) return;
+        this.sessionId = id;
+        try {
+            window.sessionStorage.setItem(SESSION_STORAGE_KEY, id);
+        } catch {
+            // Keep the in-memory id so reconnects within this page still work.
+        }
+    }
+
+    private forgetSession() {
+        this.sessionId = undefined;
+        try {
+            window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+        } catch {
+            // Ignore unavailable storage.
+        }
+    }
+
+    /// Resolve the timeout sent to the server. The server value is the
+    /// default; `?sessionTimeout=N` overrides it for this tab.
+    private sessionTimeout(): number {
+        let timeout = this.options.sessionTimeout;
+        if (!Number.isFinite(timeout) || timeout < 0) {
+            timeout = 0;
+        }
+        const override = new URLSearchParams(window.location.search).get('sessionTimeout');
+        if (override !== null) {
+            const parsed = Number.parseInt(override, 10);
+            if (Number.isFinite(parsed) && parsed >= 0) {
+                timeout = parsed;
+            }
+        }
+        return Math.min(Math.trunc(timeout), 3600);
     }
 
     @bind
@@ -287,7 +340,17 @@ export class Xterm {
         console.log('[ttyd] websocket connection opened');
 
         const { textEncoder, terminal, overlayAddon } = this;
-        const msg = JSON.stringify({ AuthToken: this.token, columns: terminal.cols, rows: terminal.rows });
+        const session = this.sessionId ?? this.storedSession();
+        if (session) {
+            this.sessionId = session;
+        }
+        const msg = JSON.stringify({
+            AuthToken: this.token,
+            columns: terminal.cols,
+            rows: terminal.rows,
+            session,
+            sessionTimeout: this.sessionTimeout(),
+        });
         this.socket?.send(textEncoder.encode(msg));
 
         if (this.opened) {
@@ -310,6 +373,11 @@ export class Xterm {
         const { refreshToken, connect, doReconnect, overlayAddon } = this;
         overlayAddon.showOverlay('Connection Closed');
         this.dispose();
+
+        // 1008: CLOSE_POLICY. The stored session cannot be used by this user.
+        if (event.code === 1008) {
+            this.forgetSession();
+        }
 
         // 1000: CLOSE_NORMAL
         if (event.code !== 1000 && doReconnect) {
@@ -343,6 +411,8 @@ export class Xterm {
         const queryObj = Array.from(new URLSearchParams(query) as unknown as Iterable<[string, string]>);
 
         for (const [k, queryVal] of queryObj) {
+            // Handled by the session handshake, not an xterm/client option.
+            if (k === 'sessionTimeout') continue;
             let v = clientOptions[k];
             if (v === undefined) v = terminal.options[k];
             switch (typeof v) {
@@ -390,6 +460,9 @@ export class Xterm {
                     ...JSON.parse(textDecoder.decode(data)),
                     ...this.parseOptsFromUrlQuery(window.location.search),
                 } as Preferences);
+                break;
+            case Command.SET_SESSION:
+                this.rememberSession(textDecoder.decode(data));
                 break;
             default:
                 console.warn(`[ttyd] unknown command: ${cmd}`);

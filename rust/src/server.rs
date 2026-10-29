@@ -28,6 +28,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 use crate::config::Config;
 use crate::html::HtmlAssets;
+use crate::session::SessionManager;
 use crate::tls::{build_acceptor, ConnInfo, TlsListener};
 use crate::ws;
 
@@ -40,6 +41,7 @@ pub struct AppState {
     pub html: Arc<HtmlAssets>,
     pub clients: AtomicUsize,
     pub shutdown: CancellationToken,
+    pub sessions: Arc<SessionManager>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,11 +54,15 @@ pub async fn run(config: Config) -> Result<()> {
     log_config(&config);
 
     let html = Arc::new(HtmlAssets::load()?);
+    let config = Arc::new(config);
+    let shutdown = CancellationToken::new();
+    let sessions = SessionManager::start(config.clone(), shutdown.clone());
     let state = Arc::new(AppState {
-        config: Arc::new(config.clone()),
+        config: config.clone(),
         html,
         clients: AtomicUsize::new(0),
-        shutdown: CancellationToken::new(),
+        shutdown,
+        sessions,
     });
 
     let app = build_router(state.clone());
@@ -354,6 +360,7 @@ async fn token_handler(
     let body = serde_json::json!({
         "token": credential,
         "login": login,
+        "sessionTimeout": state.config.session_timeout,
     })
     .to_string();
     Response::builder()
@@ -805,6 +812,10 @@ fn log_config(config: &Config) {
     info!("  start command: {}", config.command_string);
     info!("  close signal: {} ({})", config.signal_name, config.signal);
     info!("  terminal type: {}", config.terminal_type);
+    info!(
+        "  session timeout: {}s, replay buffer: {} bytes",
+        config.session_timeout, config.session_buffer_size
+    );
     if !config.endpoints.parent.is_empty() {
         info!("endpoints:");
         info!("  base-path: {}", config.endpoints.parent);
@@ -869,6 +880,7 @@ mod protocol_tests {
     use crate::config::{Config, Endpoints};
     use crate::html::HtmlAssets;
     use crate::pty::MAX_INPUT_FRAME;
+    use crate::session::SessionManager;
     use crate::tls::ConnInfo;
     use crate::ws::{CLOSE_ERROR, CLOSE_NORMAL, CLOSE_POLICY, CLOSE_TOO_LARGE};
 
@@ -910,6 +922,8 @@ mod protocol_tests {
             endpoints: Endpoints::from_base_path(None),
             ping_interval: 0,
             serv_buf_size: 4096,
+            session_timeout: 30,
+            session_buffer_size: crate::pty::DEFAULT_OUTPUT_BUFFER_LIMIT,
             ipv6: false,
             ssl: false,
             ssl_cert: None,
@@ -935,11 +949,14 @@ mod protocol_tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let shutdown = CancellationToken::new();
+        let config = Arc::new(config);
+        let sessions = SessionManager::start(config.clone(), shutdown.clone());
         let state = Arc::new(AppState {
-            config: Arc::new(config),
+            config,
             html: Arc::new(HtmlAssets::load().unwrap()),
             clients: AtomicUsize::new(0),
             shutdown: shutdown.clone(),
+            sessions,
         });
         let app = build_router(state);
         let token = shutdown.clone();
@@ -1068,12 +1085,95 @@ mod protocol_tests {
     }
 
     fn init_message(token: &str) -> Message {
-        let body = serde_json::json!({
+        init_message_with_session(token, None, None)
+    }
+
+    fn init_message_with_session(
+        token: &str,
+        session: Option<&str>,
+        session_timeout: Option<u64>,
+    ) -> Message {
+        let mut body = serde_json::json!({
             "AuthToken": token,
             "columns": 80,
             "rows": 24,
         });
+        if let Some(session) = session {
+            body["session"] = serde_json::Value::String(session.to_owned());
+        }
+        if let Some(session_timeout) = session_timeout {
+            body["sessionTimeout"] = serde_json::Value::from(session_timeout);
+        }
         Message::Text(body.to_string().into())
+    }
+
+    #[derive(Default)]
+    struct SessionFrames {
+        session: Option<String>,
+        output: Vec<u8>,
+    }
+
+    impl SessionFrames {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.output).into_owned()
+        }
+    }
+
+    async fn read_session_frames(
+        socket: &mut Client,
+        mut done: impl FnMut(&SessionFrames) -> bool,
+    ) -> SessionFrames {
+        let mut frames = SessionFrames::default();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if done(&frames) {
+                return frames;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for session frames; output {}",
+                frames.text()
+            );
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .expect("timed out waiting for session frames")
+                .expect("socket ended before the expected frames")
+                .expect("websocket error");
+            match message {
+                Message::Binary(data) => match data.first().copied() {
+                    Some(b'0') => {
+                        let payload = &data[1..];
+                        if asks_for_cursor(payload) {
+                            socket
+                                .send(Message::Binary(cursor_position_report().into()))
+                                .await
+                                .unwrap();
+                        }
+                        frames.output.extend_from_slice(payload);
+                    }
+                    Some(b'3') => {
+                        frames.session = Some(String::from_utf8_lossy(&data[1..]).into_owned());
+                    }
+                    _ => {}
+                },
+                Message::Close(frame) => {
+                    panic!(
+                        "closed before the expected frames: {frame:?}; output {}",
+                        frames.text()
+                    )
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn long_lived_session_command() -> Vec<OsString> {
+        if cfg!(windows) {
+            shell("echo session-marker& ping -n 30 127.0.0.1 >nul")
+        } else {
+            shell("printf 'session-marker\\n'; sleep 30")
+        }
     }
 
     struct SessionEnd {
@@ -1087,6 +1187,22 @@ mod protocol_tests {
 
     fn asks_for_cursor(payload: &[u8]) -> bool {
         payload.windows(4).any(|window| window == *b"\x1b[6n")
+    }
+
+    async fn wait_for_close_reply(socket: &mut Client) -> u16 {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for close reply");
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .expect("timed out waiting for close reply")
+                .expect("socket ended without a close frame")
+                .expect("websocket error");
+            if let Message::Close(frame) = message {
+                return frame.map(|frame| u16::from(frame.code)).unwrap_or(1005);
+            }
+        }
     }
 
     async fn finish(socket: &mut Client, mut after_cursor: Option<Vec<u8>>) -> SessionEnd {
@@ -1283,6 +1399,10 @@ mod protocol_tests {
         assert!(token_body.contains("\"token\""), "body was {token_body}");
         assert!(
             token_body.contains("\"login\":true"),
+            "body was {token_body}"
+        );
+        assert!(
+            token_body.contains("\"sessionTimeout\":30"),
             "body was {token_body}"
         );
 
@@ -1538,5 +1658,100 @@ mod protocol_tests {
         let end = finish(&mut socket, None).await;
         shutdown.cancel();
         assert_eq!(end.close_code, CLOSE_TOO_LARGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_reuses_the_session_and_replays_output() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut first = connect(addr, None).await;
+        read_initial(&mut first).await;
+        first.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut first, |frames| {
+            frames.session.is_some() && frames.text().contains("session-marker")
+        })
+        .await;
+        let session = frames.session.clone().expect("session id");
+        first.close(None).await.unwrap();
+        drop(first);
+
+        let mut second = connect(addr, None).await;
+        read_initial(&mut second).await;
+        second
+            .send(init_message_with_session("", Some(&session), Some(30)))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut second, |frames| {
+            frames.session.is_some() && frames.text().contains("session-marker")
+        })
+        .await;
+        shutdown.cancel();
+
+        assert_eq!(frames.session.as_deref(), Some(session.as_str()));
+        assert!(
+            frames.text().contains("session-marker"),
+            "replayed output was {}",
+            frames.text()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_session_starts_a_fresh_pty() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.writable = true;
+        config.session_timeout = 1;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut first = connect(addr, None).await;
+        read_initial(&mut first).await;
+        first.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut first, |frames| frames.session.is_some()).await;
+        let session = frames.session.clone().expect("session id");
+        first.close(None).await.unwrap();
+        drop(first);
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        let mut second = connect(addr, None).await;
+        read_initial(&mut second).await;
+        second
+            .send(init_message_with_session("", Some(&session), Some(1)))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut second, |frames| frames.session.is_some()).await;
+        shutdown.cancel();
+
+        assert_ne!(frames.session.as_deref(), Some(session.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_timeout_disables_session_persistence() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.writable = true;
+        config.session_timeout = 0;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut first = connect(addr, None).await;
+        read_initial(&mut first).await;
+        first.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut first, |frames| frames.session.is_some()).await;
+        let session = frames.session.clone().expect("session id");
+        first.close(None).await.unwrap();
+        wait_for_close_reply(&mut first).await;
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut second = connect(addr, None).await;
+        read_initial(&mut second).await;
+        second
+            .send(init_message_with_session("", Some(&session), Some(0)))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut second, |frames| frames.session.is_some()).await;
+        shutdown.cancel();
+
+        assert_ne!(frames.session.as_deref(), Some(session.as_str()));
     }
 }

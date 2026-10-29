@@ -3,6 +3,7 @@ mod config;
 mod html;
 mod pty;
 mod server;
+mod session;
 mod tls;
 mod ws;
 

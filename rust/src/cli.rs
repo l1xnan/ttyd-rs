@@ -31,6 +31,8 @@ pub fn parse_args() -> Result<Action> {
     let mut base_path: Option<String> = None;
     let mut ping_interval = 5u64;
     let mut serv_buf_size = 4096usize;
+    let mut session_timeout = 30u64;
+    let mut session_buffer_size = crate::pty::DEFAULT_OUTPUT_BUFFER_LIMIT;
     let mut ipv6 = false;
     let mut ssl = false;
     let mut ssl_cert: Option<PathBuf> = None;
@@ -97,6 +99,12 @@ pub fn parse_args() -> Result<Action> {
                 }
                 "srv-buf-size" => {
                     serv_buf_size = parse_unsigned("srv-buf-size", &take_value(name)?)?
+                }
+                "session-timeout" => {
+                    session_timeout = parse_unsigned("session-timeout", &take_value(name)?)? as u64
+                }
+                "session-buffer-size" => {
+                    session_buffer_size = parse_unsigned("session-buffer-size", &take_value(name)?)?
                 }
                 "ipv6" => ipv6 = true,
                 "ssl" => ssl = true,
@@ -300,6 +308,12 @@ pub fn parse_args() -> Result<Action> {
         } else {
             serv_buf_size
         },
+        session_timeout,
+        session_buffer_size: if session_buffer_size == 0 {
+            crate::pty::DEFAULT_OUTPUT_BUFFER_LIMIT
+        } else {
+            session_buffer_size
+        },
         ipv6,
         ssl,
         ssl_cert,
@@ -467,6 +481,8 @@ OPTIONS:\n\
     -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here, max length: 128)\n\
     -P, --ping-interval     Websocket ping interval(sec) (default: 5)\n\
     -f, --srv-buf-size      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)\n\
+        --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)\n\
+        --session-buffer-size  Bytes of output retained for session replay (default: 4194304)\n\
     -6, --ipv6              Enable IPv6 support\n\
     -S, --ssl               Enable SSL\n\
     -C, --ssl-cert          SSL certificate file path\n\
