@@ -15,8 +15,8 @@ ttyd 是一个简单的命令行工具，可通过 Web 共享终端。
 
 - 基于 [Tokio](https://tokio.rs) 和 [Axum](https://github.com/tokio-rs/axum) 的 Rust 后端，以及单文件 [xterm.js](https://xtermjs.org) 前端
 - 功能完整的终端，支持 [CJK](https://en.wikipedia.org/wiki/CJK_characters) 和输入法（IME）
-- 支持 [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM)（[lrzsz](https://ohse.de/uwe/software/lrzsz.html)）/ [trzsz](https://trzsz.github.io) 文件传输
-- 支持 [Sixel](https://en.wikipedia.org/wiki/Sixel) 图像输出（[img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix)）
+- 支持 [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM)（[lrzsz](https://ohse.de/uwe/software/lrzsz.html)）/ [trzsz](https://trzsz.github.io) 文件传输，见[文件传输与 Sixel](#文件传输与-sixel)
+- 支持 [Sixel](https://en.wikipedia.org/wiki/Sixel) 图像输出（[img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix)），见[文件传输与 Sixel](#文件传输与-sixel)
 - 基于 [rustls](https://github.com/rustls/rustls) 的 TLS 和双向 TLS 支持
 - 可运行任意自定义命令并传递参数
 - Web 登录（可选 30 天“记住我”）、Basic 认证和反向代理请求头认证
@@ -149,6 +149,48 @@ ttyd -c user:pass bash
 - `--session-buffer-size <bytes>` 调整内存中的输出回放缓冲大小。
 - 在页面 URL 后添加 `?sessionTimeout=N` 可覆盖当前标签页的超时时间（最大 3600 秒）。如果服务端以 `--session-timeout 0` 启动，该覆盖值无法重新启用会话保持。
 - `-q` / `--exit-no-conn` 与 `-o` / `--once` 保持原有语义，可能在刷新后的页面重连前退出。
+
+## 文件传输与 Sixel
+
+ZMODEM、trzsz 和 Sixel 默认关闭，用 `-t` 客户端选项打开。文件传输，以及 `img2sixel` / `lsix` 用来判断终端是否支持 Sixel 的探测应答，都要从浏览器写回 PTY，所以下面的示例都带 `-W`。只读会话仍然可以显示已经输出的 Sixel，但探测应答发不出去时，这两个工具会认为终端不支持 Sixel。
+
+对应的命令需要装在**运行 ttyd 所启动的那个程序**所在的环境里。装好之后可以按下面的命令手工试一次。持续集成不会安装 `lrzsz`、`trzsz` 或 `img2sixel`。
+
+### ZMODEM
+
+在该环境中安装 [lrzsz](https://ohse.de/uwe/software/lrzsz.html)（提供 `sz` 和 `rz`）：
+
+```sh
+ttyd -W -t enableZmodem=true bash
+```
+
+- 在网页终端里执行 `sz 文件`，浏览器会下载该文件。
+- 执行 `rz` 后选择要上传的文件。等待选择时可以按 Ctrl+C，也可以在对话框里点取消；取消后终端恢复输入。
+- 一次可以选择多个文件。
+
+### trzsz
+
+在该环境中安装 [trzsz](https://trzsz.github.io)（提供 `trz` 和 `tsz`）：
+
+```sh
+ttyd -W -t enableTrzsz=true bash
+```
+
+- `trz` 从浏览器上传文件，`tsz 文件` 把文件下载到浏览器。
+- 把文件拖进终端也会上传。拖放之后 ttyd 会在终端里启动 `trz`，并在 `-t trzszDragInitTimeout` 毫秒内等待服务端响应，默认 3000。
+- 可以和 ZMODEM 一起打开：`-t enableZmodem=true -t enableTrzsz=true`。没有 trzsz 传输在进行时，ZMODEM 仍然可用。
+
+### Sixel
+
+```sh
+ttyd -W -t enableSixel=true bash
+```
+
+安装 [libsixel](https://saitoha.github.io/libsixel) 之后，用 `img2sixel 图片.png` 显示图片，或用 [lsix](https://github.com/hackerb9/lsix) 列出当前目录里的图片。图片较大时可以加大一次从 PTY 读取的字节数，例如 `-f 65536`。
+
+打开 Sixel 后，终端对 Primary DA（`CSI c`）的应答会带上参数 `4`，`img2sixel` 和 `lsix` 靠它识别 Sixel。Secondary DA（`CSI > c`）保持 xterm.js 原来的应答。
+
+Windows 上的 ConPTY 不会原样转发 ZMODEM、trzsz 和 Sixel 使用的二进制数据，这些功能应在 Linux 或 macOS 上使用。ttyd 在 Windows 上会向浏览器发送 `isWindows=true`，trzsz 会按 Windows shell 处理换行。如果实际启动的是 POSIX shell（例如 Git Bash），再加上 `-t isWindows=false`。
 
 ## 浏览器支持
 

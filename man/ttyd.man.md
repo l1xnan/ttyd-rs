@@ -175,6 +175,35 @@ ttyd -c user:pass bash
 
   Add `?sessionTimeout=N` to the page URL to override the timeout for that tab (maximum 3600 seconds). The override cannot re-enable persistence when the server was started with `--session-timeout 0`. `-q` / `--exit-no-conn` and `-o` / `--once` keep their existing semantics and may exit before a refreshed page can reconnect.
 
+# FILE TRANSFER AND SIXEL
+  ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on. File transfer and the probe reply used by `img2sixel` / `lsix` both have to be written back to the PTY, so these examples include `-W`. Install each program in the environment of the command ttyd starts, then try the commands by hand.
+
+  ZMODEM requires [lrzsz](https://ohse.de/uwe/software/lrzsz.html) (`sz` and `rz`):
+
+```bash
+ttyd -W -t enableZmodem=true bash
+```
+
+  Run `sz file` to download a file in the browser. Run `rz` and choose files to upload. Ctrl+C, or Cancel in the dialog, restores terminal input.
+
+  [trzsz](https://trzsz.github.io) (`trz` and `tsz`):
+
+```bash
+ttyd -W -t enableTrzsz=true bash
+```
+
+  `trz` uploads from the browser and `tsz file` downloads a file. Dropping files onto the terminal also uploads them; ttyd starts `trz` and waits `-t trzszDragInitTimeout` milliseconds (default 3000) for the server. ZMODEM and trzsz can both be enabled. ZMODEM still works when no trzsz transfer is in progress.
+
+  Sixel, for [img2sixel](https://saitoha.github.io/libsixel) and [lsix](https://github.com/hackerb9/lsix):
+
+```bash
+ttyd -W -t enableSixel=true bash
+```
+
+  `img2sixel image.png` draws an image. Use a larger `-f` (for example `-f 65536`) for a large image. With Sixel enabled, the primary DA reply (`CSI c`) includes parameter `4`. The secondary DA reply (`CSI > c`) is unchanged.
+
+  ConPTY on Windows does not pass these binary protocols through unchanged; use them on Linux or macOS. On Windows, ttyd sends `isWindows=true`. If the command is a POSIX shell, add `-t isWindows=false`.
+
 # EXAMPLES
   ttyd starts web server at port 7681 by default, you can use the -p option to change it, the command will be started with arguments as options. For example, run:
   

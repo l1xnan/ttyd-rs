@@ -39,6 +39,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run check
+          pnpm test
           pnpm run build
       - uses: dtolnay/rust-toolchain@stable
         with:

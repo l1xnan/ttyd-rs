@@ -5,7 +5,7 @@ import { Login } from './login';
 import { Terminal } from './terminal';
 
 import type { ITerminalOptions, ITheme } from '@xterm/xterm';
-import type { ClientOptions, FlowControl } from './terminal/xterm';
+import { DEFAULT_CLIENT_OPTIONS, type ClientOptions, type FlowControl } from './terminal/xterm';
 
 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const path = window.location.pathname.replace(/[/]+$/, '');
@@ -13,17 +13,7 @@ const wsUrl = [protocol, '//', window.location.host, path, '/ws', window.locatio
 const tokenUrl = [window.location.protocol, '//', window.location.host, path, '/token'].join('');
 const loginUrl = [window.location.protocol, '//', window.location.host, path, '/login'].join('');
 const logoutUrl = [window.location.protocol, '//', window.location.host, path, '/logout'].join('');
-const clientOptions = {
-    rendererType: 'webgl',
-    disableLeaveAlert: false,
-    disableResizeOverlay: false,
-    enableZmodem: false,
-    enableTrzsz: false,
-    enableSixel: false,
-    closeOnDisconnect: false,
-    isWindows: false,
-    unicodeVersion: '11',
-} as ClientOptions;
+const clientOptions: ClientOptions = { ...DEFAULT_CLIENT_OPTIONS };
 const termOptions = {
     fontSize: 13,
     fontFamily: 'Consolas,Liberation Mono,Menlo,Courier,monospace',

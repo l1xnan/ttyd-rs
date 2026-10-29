@@ -40,7 +40,7 @@ export class Terminal extends Component<Props, State> {
                     this.container = c as HTMLElement;
                 }}
             >
-                <Modal show={modal}>
+                <Modal show={modal} onCancel={this.cancelSend}>
                     <label class="file-label">
                         <input onChange={this.sendFile} class="file-input" type="file" multiple />
                         <span class="file-cta">Choose files…</span>
@@ -53,6 +53,12 @@ export class Terminal extends Component<Props, State> {
     @bind
     showModal() {
         this.setState({ modal: true });
+    }
+
+    @bind
+    cancelSend() {
+        this.setState({ modal: false });
+        this.xterm.cancelSend();
     }
 
     @bind

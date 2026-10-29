@@ -254,6 +254,59 @@ By default a detached PTY is kept for 30 seconds. Reloading the page reattaches 
 Add \fB\fC?sessionTimeout=N\fR to the page URL to override the timeout for that tab (maximum 3600 seconds). The override cannot re-enable persistence when the server was started with \fB\fC--session-timeout 0\fR. \fB\fC-q\fR / \fB\fC--exit-no-conn\fR and \fB\fC-o\fR / \fB\fC--once\fR keep their existing semantics and may exit before a refreshed page can reconnect.
 
 
+.SH FILE TRANSFER AND SIXEL
+.PP
+ZMODEM, trzsz, and Sixel are off until a \fB\fC-t\fR client option turns them on. File transfer and the probe reply used by \fB\fCimg2sixel\fR / \fB\fClsix\fR both have to be written back to the PTY, so these examples include \fB\fC-W\fR. Install each program in the environment of the command ttyd starts, then try the commands by hand.
+
+.PP
+ZMODEM requires lrzsz (\fB\fCsz\fR and \fB\fCrz\fR):
+
+.PP
+.RS
+
+.nf
+ttyd -W -t enableZmodem=true bash
+
+.fi
+.RE
+
+.PP
+Run \fB\fCsz file\fR to download a file in the browser. Run \fB\fCrz\fR and choose files to upload. Ctrl+C, or Cancel in the dialog, restores terminal input.
+
+.PP
+trzsz (\fB\fCtrz\fR and \fB\fCtsz\fR):
+
+.PP
+.RS
+
+.nf
+ttyd -W -t enableTrzsz=true bash
+
+.fi
+.RE
+
+.PP
+\fB\fCtrz\fR uploads from the browser and \fB\fCtsz file\fR downloads a file. Dropping files onto the terminal also uploads them; ttyd starts \fB\fCtrz\fR and waits \fB\fC-t trzszDragInitTimeout\fR milliseconds (default 3000) for the server. ZMODEM and trzsz can both be enabled. ZMODEM still works when no trzsz transfer is in progress.
+
+.PP
+Sixel, for img2sixel and lsix:
+
+.PP
+.RS
+
+.nf
+ttyd -W -t enableSixel=true bash
+
+.fi
+.RE
+
+.PP
+\fB\fCimg2sixel image.png\fR draws an image. Use a larger \fB\fC-f\fR (for example \fB\fC-f 65536\fR) for a large image. With Sixel enabled, the primary DA reply (\fB\fCCSI c\fR) includes parameter \fB\fC4\fR. The secondary DA reply (\fB\fCCSI > c\fR) is unchanged.
+
+.PP
+ConPTY on Windows does not pass these binary protocols through unchanged; use them on Linux or macOS. On Windows, ttyd sends \fB\fCisWindows=true\fR. If the command is a POSIX shell, add \fB\fC-t isWindows=false\fR.
+
+
 .SH EXAMPLES
 .PP
 ttyd starts web server at port 7681 by default, you can use the -p option to change it, the command will be started with arguments as options. For example, run:

@@ -6,6 +6,22 @@ import { TrzszFilter } from 'trzsz';
 
 const SEND_CHUNK_SIZE = 64 * 1024;
 
+const SIZE_UNITS = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+
+/** Human-readable size used in the ZMODEM progress line. */
+export function formatTransferSize(bytes: number, precision: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) return '-';
+    if (bytes === 0) return '0';
+    const num = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), SIZE_UNITS.length - 1);
+    const value = (bytes / 1024 ** num).toFixed(precision);
+    return `${value} ${SIZE_UNITS[num]}`;
+}
+
+export function formatTransferProgress(name: string, offset: number, size: number): string {
+    const percent = size > 0 ? ((100 * offset) / size).toFixed(2) : '100.00';
+    return `${name} ${percent}% ${formatTransferSize(offset, 2)}/${formatTransferSize(size, 2)}\r`;
+}
+
 interface ZmodemFileDetails {
     name: string;
     size: number;
@@ -54,6 +70,12 @@ export interface ZmodeOptions {
     onSend: () => void;
     sender: (data: string | Uint8Array) => void;
     writer: (data: string | Uint8Array) => void;
+    /**
+     * Required only when trzsz detects a Node.js runtime (its own tests and
+     * Electron). The browser build ignores these and uses the file picker.
+     */
+    chooseSendFiles?: (directory?: boolean) => Promise<string[] | undefined>;
+    chooseSaveDirectory?: () => Promise<string | undefined>;
 }
 
 export class ZmodemAddon implements ITerminalAddon {
@@ -92,6 +114,36 @@ export class ZmodemAddon implements ITerminalAddon {
         }
     }
 
+    /**
+     * Pass keyboard input through trzsz so an in-progress transfer can swallow
+     * keystrokes and handle Ctrl+C. Returns false when trzsz is inactive and
+     * the caller should forward the input itself.
+     */
+    handleTerminalInput(data: string): boolean {
+        if (!this.options.trzsz || !this.trzszFilter) return false;
+        this.trzszFilter.processTerminalInput(data);
+        return true;
+    }
+
+    /** Same as {@link handleTerminalInput} for mouse and other binary input. */
+    handleBinaryInput(data: string): boolean {
+        if (!this.options.trzsz || !this.trzszFilter) return false;
+        this.trzszFilter.processBinaryInput(data);
+        return true;
+    }
+
+    /** Reject a pending upload and return the terminal to normal input. */
+    cancelSend(): void {
+        const deny = this.denier;
+        this.denier = null;
+        try {
+            deny?.();
+        } catch (e) {
+            console.error('[ttyd] zmodem cancel: ', e);
+        }
+        this.reset();
+    }
+
     @bind
     private reset() {
         this.session = null;
@@ -121,6 +173,8 @@ export class ZmodemAddon implements ITerminalAddon {
             terminalColumns: terminal.cols,
             isWindowsShell: this.options.windows,
             dragInitTimeout: this.options.trzszDragInitTimeout,
+            chooseSendFiles: this.options.chooseSendFiles,
+            chooseSaveDirectory: this.options.chooseSaveDirectory,
         });
         const element = terminal.element as EventTarget;
         this.addDisposableListener(element, 'dragover', event => event.preventDefault());
@@ -244,25 +298,7 @@ export class ZmodemAddon implements ITerminalAddon {
 
     @bind
     private writeProgress(progress: ZmodemProgress) {
-        const { bytesHuman } = this;
         const file = progress.get_details();
-        const name = file.name;
-        const size = file.size;
-        const offset = progress.get_offset();
-        const percent = size > 0 ? ((100 * offset) / size).toFixed(2) : '100.00';
-
-        this.options.writer(`${name} ${percent}% ${bytesHuman(offset, 2)}/${bytesHuman(size, 2)}\r`);
-    }
-
-    private bytesHuman(bytes: any, precision: number): string {
-        if (!/^([-+])?|(\.\d+)(\d+(\.\d+)?|(\d+\.)|Infinity)$/.test(bytes)) {
-            return '-';
-        }
-        if (bytes === 0) return '0';
-        if (typeof precision === 'undefined') precision = 1;
-        const units = ['bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
-        const num = Math.floor(Math.log(bytes) / Math.log(1024));
-        const value = (bytes / Math.pow(1024, Math.floor(num))).toFixed(precision);
-        return `${value} ${units[num]}`;
+        this.options.writer(formatTransferProgress(file.name, progress.get_offset(), file.size));
     }
 }

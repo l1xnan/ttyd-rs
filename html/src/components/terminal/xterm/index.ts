@@ -9,8 +9,12 @@ import { ImageAddon } from '@xterm/addon-image';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
 import { ZmodemAddon } from './addons/zmodem';
+import { activePreferenceEntries, parseQueryOptions, type ClientOptions, type RendererType } from './prefs';
+import { sixelPrimaryDeviceAttributes } from './sixel';
 
 import '@xterm/xterm/css/xterm.css';
+
+export { DEFAULT_CLIENT_OPTIONS, type ClientOptions, type RendererType } from './prefs';
 
 interface TtydTerminal extends Terminal {
     fit(): void;
@@ -35,25 +39,8 @@ enum Command {
     PAUSE = '2',
     RESUME = '3',
 }
+
 type Preferences = ITerminalOptions & ClientOptions;
-
-// 'canvas' is kept for backwards compatibility with existing client options;
-// xterm.js 6 removed the canvas addon and it falls back to the DOM renderer.
-export type RendererType = 'dom' | 'canvas' | 'webgl';
-
-export interface ClientOptions {
-    rendererType: RendererType;
-    disableLeaveAlert: boolean;
-    disableResizeOverlay: boolean;
-    enableZmodem: boolean;
-    enableTrzsz: boolean;
-    enableSixel: boolean;
-    titleFixed?: string;
-    isWindows: boolean;
-    trzszDragInitTimeout: number;
-    unicodeVersion: string;
-    closeOnDisconnect: boolean;
-}
 
 export interface FlowControl {
     limit: number;
@@ -96,6 +83,7 @@ export class Xterm {
     private webLinksAddon = new WebLinksAddon();
     private webglAddon?: WebglAddon;
     private zmodemAddon?: ZmodemAddon;
+    private sixelInstalled = false;
 
     private socket?: WebSocket;
     private token: string;
@@ -120,6 +108,9 @@ export class Xterm {
             d.dispose();
         }
         this.disposables.length = 0;
+        this.zmodemAddon = undefined;
+        this.sixelInstalled = false;
+        this.writeFunc = data => this.writeData(new Uint8Array(data));
     }
 
     @bind
@@ -143,6 +134,10 @@ export class Xterm {
     @bind
     public sendFile(files: FileList) {
         this.zmodemAddon?.sendFile(files);
+    }
+
+    public cancelSend() {
+        this.zmodemAddon?.cancelSend();
     }
 
     @bind
@@ -258,8 +253,18 @@ export class Xterm {
                 }
             })
         );
-        register(terminal.onData(data => sendData(data)));
-        register(terminal.onBinary(data => sendData(Uint8Array.from(data, v => v.charCodeAt(0)))));
+        register(
+            terminal.onData(data => {
+                if (this.zmodemAddon?.handleTerminalInput(data)) return;
+                sendData(data);
+            })
+        );
+        register(
+            terminal.onBinary(data => {
+                if (this.zmodemAddon?.handleBinaryInput(data)) return;
+                sendData(Uint8Array.from(data, v => v.charCodeAt(0)));
+            })
+        );
         register(
             terminal.onResize(({ cols, rows }) => {
                 const msg = JSON.stringify({ columns: cols, rows: rows });
@@ -405,38 +410,16 @@ export class Xterm {
 
     @bind
     private parseOptsFromUrlQuery(query: string): Preferences {
-        const { terminal } = this;
-        const { clientOptions } = this.options;
-        const prefs = {} as Preferences;
-        const queryObj = Array.from(new URLSearchParams(query) as unknown as Iterable<[string, string]>);
-
-        for (const [k, queryVal] of queryObj) {
-            // Handled by the session handshake, not an xterm/client option.
-            if (k === 'sessionTimeout') continue;
-            let v = clientOptions[k];
-            if (v === undefined) v = terminal.options[k];
-            switch (typeof v) {
-                case 'boolean':
-                    prefs[k] = queryVal === 'true' || queryVal === '1';
-                    break;
-                case 'number':
-                case 'bigint':
-                    prefs[k] = Number.parseInt(queryVal, 10);
-                    break;
-                case 'string':
-                    prefs[k] = queryVal;
-                    break;
-                case 'object':
-                    prefs[k] = JSON.parse(queryVal);
-                    break;
-                default:
-                    console.warn(`[ttyd] maybe unknown option: ${k}=${queryVal}, treating as string`);
-                    prefs[k] = queryVal;
-                    break;
+        const parsed = parseQueryOptions(query, this.options.clientOptions, this.terminal.options);
+        for (const [key, value] of Object.entries(parsed)) {
+            if (
+                this.options.clientOptions[key as keyof ClientOptions] === undefined &&
+                this.terminal.options[key] === undefined
+            ) {
+                console.warn(`[ttyd] maybe unknown option: ${key}=${value}, treating as string`);
             }
         }
-
-        return prefs;
+        return parsed as Preferences;
     }
 
     @bind
@@ -473,7 +456,7 @@ export class Xterm {
     @bind
     private applyPreferences(prefs: Preferences) {
         const { terminal, fitAddon, register } = this;
-        if (prefs.enableZmodem || prefs.enableTrzsz) {
+        if ((prefs.enableZmodem || prefs.enableTrzsz) && !this.zmodemAddon) {
             this.zmodemAddon = new ZmodemAddon({
                 zmodem: prefs.enableZmodem,
                 trzsz: prefs.enableTrzsz,
@@ -487,7 +470,7 @@ export class Xterm {
             terminal.loadAddon(register(this.zmodemAddon));
         }
 
-        for (const [key, value] of Object.entries(prefs)) {
+        for (const [key, value] of activePreferenceEntries(prefs)) {
             switch (key) {
                 case 'rendererType':
                     this.setRendererType(value);
@@ -522,7 +505,7 @@ export class Xterm {
                     break;
                 case 'enableSixel':
                     if (value) {
-                        terminal.loadAddon(register(new ImageAddon()));
+                        this.installSixel(terminal);
                         console.log('[ttyd] Sixel enabled');
                     }
                     break;
@@ -535,7 +518,7 @@ export class Xterm {
                     }
                     break;
                 case 'titleFixed':
-                    if (!value || value === '') return;
+                    if (!value || value === '') break;
                     console.log(`[ttyd] setting fixed title: ${value}`);
                     this.titleFixed = value;
                     document.title = value;
@@ -569,6 +552,22 @@ export class Xterm {
                     break;
             }
         }
+    }
+
+    @bind
+    private installSixel(terminal: Terminal) {
+        if (this.sixelInstalled) return;
+        this.sixelInstalled = true;
+        terminal.loadAddon(this.register(new ImageAddon()));
+        // Primary DA only. `CSI > c` (secondary DA) keeps xterm.js's own reply.
+        this.register(
+            terminal.parser.registerCsiHandler({ final: 'c' }, params => {
+                const reply = sixelPrimaryDeviceAttributes(params);
+                if (!reply) return false;
+                terminal.input(reply, false);
+                return true;
+            })
+        );
     }
 
     @bind

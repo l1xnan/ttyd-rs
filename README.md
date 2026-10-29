@@ -15,8 +15,8 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 
 - Rust backend built on [Tokio](https://tokio.rs) and [Axum](https://github.com/tokio-rs/axum), with a single-file [xterm.js](https://xtermjs.org) frontend
 - Fully-featured terminal with [CJK](https://en.wikipedia.org/wiki/CJK_characters) and IME support
-- [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM) ([lrzsz](https://ohse.de/uwe/software/lrzsz.html)) / [trzsz](https://trzsz.github.io) file transfer support
-- [Sixel](https://en.wikipedia.org/wiki/Sixel) image output support ([img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix))
+- [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM) ([lrzsz](https://ohse.de/uwe/software/lrzsz.html)) / [trzsz](https://trzsz.github.io) file transfer support, see [File transfer and Sixel](#file-transfer-and-sixel)
+- [Sixel](https://en.wikipedia.org/wiki/Sixel) image output support ([img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix)), see [File transfer and Sixel](#file-transfer-and-sixel)
 - TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
 - Run any custom command with options
 - Web login with optional 30-day "remember me", Basic authentication, and reverse-proxy header authentication
@@ -179,6 +179,70 @@ each tab has its own session and opening a new tab starts a fresh command.
   server was started with `--session-timeout 0`.
 - `-q` / `--exit-no-conn` and `-o` / `--once` keep their existing semantics and
   may exit before a refreshed page can reconnect.
+
+## File transfer and Sixel
+
+ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on.
+File transfer, and the probe reply that `img2sixel` / `lsix` use to decide
+whether the terminal supports Sixel, both have to be written back to the PTY,
+so the examples below include `-W`. A read-only session can still display
+Sixel that is already in the output, but those tools treat a missing probe
+reply as "no Sixel support".
+
+Install each program in the environment of the command ttyd starts. After it
+is installed, try the commands below by hand. Continuous integration does not
+install `lrzsz`, `trzsz`, or `img2sixel`.
+
+### ZMODEM
+
+Install [lrzsz](https://ohse.de/uwe/software/lrzsz.html) (`sz` and `rz`) in that
+environment:
+
+```sh
+ttyd -W -t enableZmodem=true bash
+```
+
+- Run `sz file` in the web terminal to download that file in the browser.
+- Run `rz`, then choose the files to upload. Press Ctrl+C while ttyd is waiting
+  for a choice, or use Cancel in the dialog; either one restores terminal input.
+- More than one file can be selected at a time.
+
+### trzsz
+
+Install [trzsz](https://trzsz.github.io) (`trz` and `tsz`) in that environment:
+
+```sh
+ttyd -W -t enableTrzsz=true bash
+```
+
+- `trz` uploads from the browser, and `tsz file` downloads a file to the browser.
+- Dropping files onto the terminal also uploads them. ttyd then starts `trz` in
+  the terminal and waits `-t trzszDragInitTimeout` milliseconds for the server
+  to respond. The default is 3000.
+- ZMODEM can be enabled at the same time with
+  `-t enableZmodem=true -t enableTrzsz=true`. ZMODEM still works when no trzsz
+  transfer is in progress.
+
+### Sixel
+
+```sh
+ttyd -W -t enableSixel=true bash
+```
+
+With [libsixel](https://saitoha.github.io/libsixel) installed, `img2sixel image.png`
+draws an image. [lsix](https://github.com/hackerb9/lsix) lists the images in
+the current directory. For a large image, raise the PTY read size, for example
+`-f 65536`.
+
+With Sixel enabled, the primary device-attributes reply (`CSI c`) includes
+parameter `4`, which is what `img2sixel` and `lsix` look for. The secondary
+reply (`CSI > c`) stays the one xterm.js already sends.
+
+ConPTY on Windows does not pass the binary bytes used by ZMODEM, trzsz, and
+Sixel through unchanged, so use these features on Linux or macOS. On Windows,
+ttyd sends `isWindows=true` to the browser and trzsz treats newlines as a
+Windows shell. If the command is actually a POSIX shell, such as Git Bash, add
+`-t isWindows=false`.
 
 ## Browser Support
 

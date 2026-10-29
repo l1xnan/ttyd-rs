@@ -13,7 +13,11 @@ pub enum Action {
 }
 
 pub fn parse_args() -> Result<Action> {
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    parse_args_from(std::env::args_os().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = impl Into<OsString>>) -> Result<Action> {
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     if args.is_empty() {
         return Ok(Action::Help);
     }
@@ -562,6 +566,32 @@ mod tests {
         assert_eq!(prefs["cursorBlink"], serde_json::json!(true));
         assert_eq!(prefs["renderer"], serde_json::json!({"type": "canvas"}));
         assert!(add_client_option(&mut prefs, "missing-equals").is_err());
+    }
+
+    #[test]
+    fn parses_transfer_client_options() {
+        let action = parse_args_from([
+            "-W",
+            "-t",
+            "enableZmodem=true",
+            "-t",
+            "enableTrzsz=true",
+            "-t",
+            "enableSixel=true",
+            "-t",
+            "trzszDragInitTimeout=1500",
+            "bash",
+        ])
+        .unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert!(config.writable);
+        let prefs: serde_json::Value = serde_json::from_str(&config.prefs_json).unwrap();
+        assert_eq!(prefs["enableZmodem"], true);
+        assert_eq!(prefs["enableTrzsz"], true);
+        assert_eq!(prefs["enableSixel"], true);
+        assert_eq!(prefs["trzszDragInitTimeout"], 1500);
     }
 
     #[test]
