@@ -316,6 +316,8 @@ mod tests {
             interface: None,
             socket_owner: None,
             credential: None,
+            username: None,
+            login_announcement: None,
             auth_header: None,
             uid: None,
             gid: None,

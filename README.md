@@ -103,6 +103,8 @@ OPTIONS:
     -i, --interface         Network interface to bind (eg: eth0), or UNIX domain socket path (eg: /var/run/ttyd.sock)
     -U, --socket-owner      User owner of the UNIX domain socket file, when enabled (eg: user:group)
     -c, --credential        Credential for web login and Basic authentication (format: username:password)
+        --credential-file   Read username:password from a file. TTYD_CREDENTIAL uses the same format and is removed from the environment
+        --random-credential Generate a ttyd:<password> login and print it to stderr. Mutually exclusive with --credential, --credential-file, and TTYD_CREDENTIAL
     -H, --auth-header       HTTP Header name for auth proxy, this will configure ttyd to let a HTTP reverse proxy handle authentication
     -u, --uid               User id to run with
     -g, --gid               Group id to run with
@@ -143,6 +145,16 @@ credential also continues to work with HTTP Basic authentication:
 ```sh
 ttyd -c user:pass bash
 ```
+
+`--credential`, `--credential-file`, and the `TTYD_CREDENTIAL` environment
+variable are mutually exclusive, and each one is also mutually exclusive with
+`--random-credential`. `--credential-file` reads `username:password` from a
+file and removes a single trailing newline. On Unix, ttyd warns when that file
+is readable by the group or by others. `TTYD_CREDENTIAL` uses the same format
+and is removed from the environment before the command starts.
+`--random-credential` signs in as `ttyd` with a generated password and prints
+`ttyd login: ttyd:<password>` to stderr once. A random password changes on
+every start, so remembered logins from the previous process stop working.
 
 - The built-in login page is shown when authentication is required. "Keep me
   signed in" is checked by default and keeps the login for 30 days in the

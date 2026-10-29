@@ -51,6 +51,9 @@ pub struct AuthUser {
 
 pub async fn run(config: Config) -> Result<()> {
     init_logging(config.debug_level);
+    if let Some(login) = &config.login_announcement {
+        eprintln!("ttyd login: {login}");
+    }
     log_config(&config);
 
     let html = Arc::new(HtmlAssets::load()?);
@@ -175,7 +178,7 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
         if cookie_value(headers, &cookie_name)
             .is_some_and(|token| verify_login_token(credential, token))
         {
-            return Ok(None);
+            return Ok(config.username.clone());
         }
 
         let value = headers
@@ -185,8 +188,8 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
         let supplied = value
             .strip_prefix("Basic ")
             .ok_or(AuthFailure::Unauthorized)?;
-        if supplied == credential {
-            return Ok(None);
+        if constant_time_eq(supplied, credential) {
+            return Ok(config.username.clone());
         }
         return Err(AuthFailure::Unauthorized);
     }
@@ -383,7 +386,20 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 
 fn credentials_match(credential: &str, username: &str, password: &str) -> bool {
     let supplied = STANDARD.encode(format!("{username}:{password}"));
-    supplied == credential
+    constant_time_eq(&supplied, credential)
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (left, right) in left.iter().zip(right.iter()) {
+        diff |= left ^ right;
+    }
+    diff == 0
 }
 
 fn create_login_token(credential: &str, ttl_secs: u64) -> Option<String> {
@@ -913,6 +929,8 @@ mod protocol_tests {
             interface: None,
             socket_owner: None,
             credential: None,
+            username: None,
+            login_announcement: None,
             auth_header: None,
             uid: None,
             gid: None,
@@ -1410,6 +1428,25 @@ mod protocol_tests {
         read_initial(&mut socket).await;
         socket.send(init_message(&credential)).await.unwrap();
         shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generated_credential_can_log_in() {
+        let raw = crate::cli::generate_random_credential().unwrap();
+        let (username, password) = raw.split_once(':').unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+        let mut config = test_config(shell("exit 0"), "exit");
+        config.credential = Some(encoded);
+        config.username = Some(username.to_owned());
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let body = serde_json::json!({ "username": username, "password": password }).to_string();
+        let response = http_request(addr, http_post_json(addr, "/login", &body, None)).await;
+        shutdown.cancel();
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "response was {response}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

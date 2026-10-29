@@ -95,6 +95,8 @@ cargo build --release --manifest-path rust/Cargo.toml
     -i, --interface         要绑定的网络接口（例如 eth0），或 UNIX 域套接字路径（例如 /var/run/ttyd.sock）
     -U, --socket-owner      UNIX 域套接字文件的所属用户（例如 user:group）
     -c, --credential        Web 登录和 Basic 认证使用的凭据（格式：username:password）
+        --credential-file   从文件读取 username:password。TTYD_CREDENTIAL 使用相同格式，读取后会从环境变量中删除
+        --random-credential 生成 ttyd:<password> 登录口令并打印到 stderr。与 --credential、--credential-file、TTYD_CREDENTIAL 互斥
     -H, --auth-header       用于认证代理的 HTTP 请求头名称；配置后由 HTTP 反向代理处理认证
     -u, --uid               运行所使用的用户 ID
     -g, --gid               运行所使用的用户组 ID
@@ -134,6 +136,8 @@ cargo build --release --manifest-path rust/Cargo.toml
 ```sh
 ttyd -c user:pass bash
 ```
+
+`--credential`、`--credential-file` 和 `TTYD_CREDENTIAL` 互相排斥，它们也都不能和 `--random-credential` 一起使用。`--credential-file` 从文件读取 `username:password`，并去掉末尾的一个换行。在 Unix 上，如果该文件对组或其他用户可读，ttyd 会给出警告。`TTYD_CREDENTIAL` 使用相同格式，并在启动子程序之前从环境变量中删除。`--random-credential` 以用户名 `ttyd` 和随机密码登录，并向 stderr 打印一次 `ttyd login: ttyd:<password>`。随机密码在每次启动时都会变化，因此上一次进程留下的记住登录会失效。
 
 - 需要认证时会显示内置登录页。“记住我”默认勾选，会在当前浏览器中保持登录 30 天。取消勾选时，登录使用会话 Cookie，并在 12 小时后或浏览器关闭时失效。
 - “记住我”登录使用经 HMAC 签名的 `HttpOnly` Cookie。只要 `-c` 凭据不变，ttyd 重启后登录仍然有效；更改凭据会使已有的记住登录失效。退出登录会清除当前浏览器中的 Cookie；由于会话是无状态的，已复制的 Cookie 在过期前仍然有效。

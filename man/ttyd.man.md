@@ -33,6 +33,12 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -c, --credential USER[:PASSWORD]
       Credential for web login and Basic authentication (format: username:password)
 
+  --credential-file <path>
+      Read username:password from a file and remove one trailing newline. TTYD_CREDENTIAL uses the same format and is removed from the environment. Mutually exclusive with --credential, TTYD_CREDENTIAL, and --random-credential
+
+  --random-credential
+      Generate a ttyd:<password> login and print it to stderr. Mutually exclusive with --credential, --credential-file, and TTYD_CREDENTIAL
+
   -H, --auth-header <name>
       HTTP Header name for auth proxy, this will configure ttyd to let a HTTP reverse proxy handle authentication
 
@@ -159,6 +165,8 @@ ttyd -t cursorStyle=bar -t lineHeight=1.5 -t 'theme={"background": "green"}' bas
 ```bash
 ttyd -c user:pass bash
 ```
+
+  `--credential`, `--credential-file`, and `TTYD_CREDENTIAL` are mutually exclusive with each other and with `--random-credential`. `--credential-file` reads `username:password` and removes one trailing newline. On Unix, ttyd warns when that file is readable by the group or by others. `TTYD_CREDENTIAL` uses the same format and is removed from the environment before the command starts. `--random-credential` signs in as `ttyd` with a generated password and prints `ttyd login: ttyd:<password>` to stderr once. A random password changes on every start, so remembered logins from the previous process stop working.
 
   The built-in login page is shown when authentication is required. "Keep me signed in" is checked by default and keeps the login for 30 days in the current browser. When unchecked, the login uses a session cookie and expires after 12 hours or when the browser closes.
 

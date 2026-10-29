@@ -52,6 +52,9 @@ pub struct Config {
     pub interface: Option<String>,
     pub socket_owner: Option<String>,
     pub credential: Option<String>,
+    pub username: Option<String>,
+    /// Plain `username:password` printed once when `--random-credential` is set.
+    pub login_announcement: Option<String>,
     pub auth_header: Option<String>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,

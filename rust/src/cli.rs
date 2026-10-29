@@ -1,5 +1,6 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -13,10 +14,13 @@ pub enum Action {
 }
 
 pub fn parse_args() -> Result<Action> {
-    parse_args_from(std::env::args_os().skip(1))
+    parse_args_from(std::env::args_os().skip(1), take_env_credential()?)
 }
 
-fn parse_args_from(args: impl IntoIterator<Item = impl Into<OsString>>) -> Result<Action> {
+fn parse_args_from(
+    args: impl IntoIterator<Item = impl Into<OsString>>,
+    env_credential: Option<String>,
+) -> Result<Action> {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     if args.is_empty() {
         return Ok(Action::Help);
@@ -26,6 +30,8 @@ fn parse_args_from(args: impl IntoIterator<Item = impl Into<OsString>>) -> Resul
     let mut interface: Option<String> = None;
     let mut socket_owner: Option<String> = None;
     let mut credential: Option<String> = None;
+    let mut credential_file: Option<PathBuf> = None;
+    let mut random_credential = false;
     let mut auth_header: Option<String> = None;
     let mut uid = None;
     let mut gid = None;
@@ -91,6 +97,8 @@ fn parse_args_from(args: impl IntoIterator<Item = impl Into<OsString>>) -> Resul
                 "interface" => interface = Some(take_value(name)?),
                 "socket-owner" => socket_owner = Some(take_value(name)?),
                 "credential" => credential = Some(encode_credential(&take_value(name)?)?),
+                "credential-file" => credential_file = Some(PathBuf::from(take_value(name)?)),
+                "random-credential" => random_credential = true,
                 "auth-header" => auth_header = Some(take_value(name)?.to_ascii_lowercase()),
                 "uid" => uid = Some(parse_u32("uid", &take_value(name)?)?),
                 "gid" => gid = Some(parse_u32("gid", &take_value(name)?)?),
@@ -293,12 +301,20 @@ fn parse_args_from(args: impl IntoIterator<Item = impl Into<OsString>>) -> Resul
     }
 
     let prefs_json = serde_json::to_string(&serde_json::Value::Object(prefs))?;
+    let resolved = resolve_credential(
+        credential,
+        credential_file.as_deref(),
+        env_credential.as_deref(),
+        random_credential,
+    )?;
 
     Ok(Action::Run(Box::new(Config {
         port,
         interface,
         socket_owner,
-        credential,
+        credential: resolved.credential,
+        username: resolved.username,
+        login_announcement: resolved.announcement,
         auth_header,
         uid,
         gid,
@@ -358,6 +374,159 @@ fn encode_credential(value: &str) -> Result<String> {
         bail!("invalid credential, format: username:password");
     }
     Ok(base64::engine::general_purpose::STANDARD.encode(value.as_bytes()))
+}
+
+const CREDENTIAL_FILE_LIMIT: usize = 4096;
+const CREDENTIAL_ENV: &str = "TTYD_CREDENTIAL";
+
+struct ResolvedCredential {
+    credential: Option<String>,
+    username: Option<String>,
+    announcement: Option<String>,
+}
+
+fn take_env_credential() -> Result<Option<String>> {
+    match std::env::var(CREDENTIAL_ENV) {
+        Ok(value) => {
+            std::env::remove_var(CREDENTIAL_ENV);
+            if value.is_empty() {
+                bail!("TTYD_CREDENTIAL is empty");
+            }
+            Ok(Some(value))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            std::env::remove_var(CREDENTIAL_ENV);
+            bail!("TTYD_CREDENTIAL is not valid Unicode");
+        }
+    }
+}
+
+fn resolve_credential(
+    encoded_flag: Option<String>,
+    file: Option<&Path>,
+    env_value: Option<&str>,
+    random: bool,
+) -> Result<ResolvedCredential> {
+    let sources = encoded_flag.is_some() as u8
+        + file.is_some() as u8
+        + env_value.is_some() as u8
+        + u8::from(random);
+    if sources > 1 {
+        bail!(
+            "--credential, --credential-file, TTYD_CREDENTIAL, and --random-credential are mutually exclusive"
+        );
+    }
+
+    if let Some(encoded) = encoded_flag {
+        let username = username_from_encoded(&encoded)?;
+        return Ok(ResolvedCredential {
+            credential: Some(encoded),
+            username: Some(username),
+            announcement: None,
+        });
+    }
+    if let Some(path) = file {
+        return finish_raw_credential(read_credential_file(path)?, None);
+    }
+    if let Some(raw) = env_value {
+        return finish_raw_credential(raw.to_owned(), None);
+    }
+    if random {
+        let raw = generate_random_credential()?;
+        return finish_raw_credential(raw.clone(), Some(raw));
+    }
+    Ok(ResolvedCredential {
+        credential: None,
+        username: None,
+        announcement: None,
+    })
+}
+
+fn finish_raw_credential(raw: String, announcement: Option<String>) -> Result<ResolvedCredential> {
+    let username = username_from_raw(&raw)?;
+    Ok(ResolvedCredential {
+        credential: Some(encode_credential(&raw)?),
+        username: Some(username),
+        announcement,
+    })
+}
+
+fn read_credential_file(path: &Path) -> Result<String> {
+    warn_if_credential_file_is_exposed(path);
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open credential file {}", path.display()))?;
+    let mut buffer = Vec::new();
+    file.take(CREDENTIAL_FILE_LIMIT as u64 + 1)
+        .read_to_end(&mut buffer)
+        .with_context(|| format!("failed to read credential file {}", path.display()))?;
+    if buffer.len() > CREDENTIAL_FILE_LIMIT {
+        bail!(
+            "credential file is larger than {CREDENTIAL_FILE_LIMIT} bytes: {}",
+            path.display()
+        );
+    }
+    let mut text = String::from_utf8(buffer)
+        .with_context(|| format!("credential file is not valid UTF-8: {}", path.display()))?;
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    if text.is_empty() {
+        bail!("credential file is empty: {}", path.display());
+    }
+    Ok(text)
+}
+
+fn warn_if_credential_file_is_exposed(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return;
+        };
+        if metadata.permissions().mode() & 0o077 != 0 {
+            eprintln!(
+                "ttyd: warning: credential file is readable by group or others: {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+fn username_from_raw(raw: &str) -> Result<String> {
+    let (username, _) = raw
+        .split_once(':')
+        .ok_or_else(|| anyhow!("invalid credential, format: username:password"))?;
+    if username.is_empty() {
+        bail!("invalid credential, format: username:password");
+    }
+    Ok(username.to_owned())
+}
+
+fn username_from_encoded(encoded: &str) -> Result<String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("invalid credential, format: username:password")?;
+    let raw = String::from_utf8(bytes).context("invalid credential, format: username:password")?;
+    username_from_raw(&raw)
+}
+
+pub(crate) fn generate_random_credential() -> Result<String> {
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let mut bytes = [0u8; 18];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow!("failed to generate a login password"))?;
+    let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    Ok(format!("ttyd:{password}"))
 }
 
 fn parse_int(name: &str, value: &str) -> Result<i32> {
@@ -467,6 +636,8 @@ OPTIONS:\n\
     -i, --interface         Network interface to bind (eg: eth0), or UNIX domain socket path (eg: /var/run/ttyd.sock)\n\
     -U, --socket-owner      User owner of the UNIX domain socket file, when enabled (eg: user:group)\n\
     -c, --credential        Credential for web login and Basic authentication (format: username:password)\n\
+        --credential-file   Read username:password from a file. TTYD_CREDENTIAL uses the same format and is removed from the environment\n\
+        --random-credential Generate a ttyd:<password> login and print it to stderr. Mutually exclusive with --credential, --credential-file, and TTYD_CREDENTIAL\n\
     -H, --auth-header       HTTP Header name for auth proxy, this will configure ttyd to let a HTTP reverse proxy handle authentication\n\
     -u, --uid               User id to run with\n\
     -g, --gid               Group id to run with\n\
@@ -515,6 +686,8 @@ pub fn check_cwd(cwd: &Option<PathBuf>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
 
     #[test]
@@ -570,18 +743,21 @@ mod tests {
 
     #[test]
     fn parses_transfer_client_options() {
-        let action = parse_args_from([
-            "-W",
-            "-t",
-            "enableZmodem=true",
-            "-t",
-            "enableTrzsz=true",
-            "-t",
-            "enableSixel=true",
-            "-t",
-            "trzszDragInitTimeout=1500",
-            "bash",
-        ])
+        let action = parse_args_from(
+            [
+                "-W",
+                "-t",
+                "enableZmodem=true",
+                "-t",
+                "enableTrzsz=true",
+                "-t",
+                "enableSixel=true",
+                "-t",
+                "trzszDragInitTimeout=1500",
+                "bash",
+            ],
+            None,
+        )
         .unwrap();
         let Action::Run(config) = action else {
             panic!("expected a running configuration");
@@ -603,4 +779,161 @@ mod tests {
         assert_eq!(signal_name(15), "SIGTERM");
         assert!(signal_number("not-a-signal").is_none());
     }
+
+    #[test]
+    fn credential_flag_sets_the_username() {
+        let action = parse_args_from(["-c", "user:pass", "true"], None).unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.username.as_deref(), Some("user"));
+        assert_eq!(
+            config.credential.as_deref(),
+            Some(encode_credential("user:pass").unwrap().as_str())
+        );
+        assert!(config.login_announcement.is_none());
+    }
+
+    #[test]
+    fn rejects_multiple_credential_sources() {
+        let Err(error) = parse_args_from(["-c", "user:pass", "--random-credential", "true"], None)
+        else {
+            panic!("expected mutually exclusive credentials to fail");
+        };
+        let error = error.to_string();
+        assert!(error.contains("mutually exclusive"), "{error}");
+
+        let path = credential_temp_path("overlap");
+        std::fs::write(&path, "alice:secret\n").unwrap();
+        let Err(error) = parse_args_from(
+            [
+                OsString::from("--credential-file"),
+                path.as_os_str().to_os_string(),
+                OsString::from("--random-credential"),
+                OsString::from("true"),
+            ],
+            Some("bob:secret".to_owned()),
+        ) else {
+            panic!("expected mutually exclusive credentials to fail");
+        };
+        let error = error.to_string();
+        let _ = std::fs::remove_file(&path);
+        assert!(error.contains("mutually exclusive"), "{error}");
+    }
+
+    #[test]
+    fn reads_a_credential_file_and_strips_one_newline() {
+        let path = credential_temp_path("file");
+        std::fs::write(&path, "alice:secret\r\n").unwrap();
+        let action = parse_args_from(
+            [
+                OsString::from("--credential-file"),
+                path.as_os_str().to_os_string(),
+                OsString::from("true"),
+            ],
+            None,
+        )
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.username.as_deref(), Some("alice"));
+        assert_eq!(
+            config.credential.as_deref(),
+            Some(encode_credential("alice:secret").unwrap().as_str())
+        );
+        assert!(config.login_announcement.is_none());
+    }
+
+    #[test]
+    fn rejects_an_empty_or_oversized_credential_file() {
+        let empty = credential_temp_path("empty");
+        std::fs::write(&empty, "\n").unwrap();
+        let Err(error) = parse_args_from(
+            [
+                OsString::from("--credential-file"),
+                empty.as_os_str().to_os_string(),
+                OsString::from("true"),
+            ],
+            None,
+        ) else {
+            panic!("expected an empty credential file to fail");
+        };
+        let error = error.to_string();
+        let _ = std::fs::remove_file(&empty);
+        assert!(error.contains("empty"), "{error}");
+
+        let large = credential_temp_path("large");
+        std::fs::write(&large, vec![b'a'; CREDENTIAL_FILE_LIMIT + 1]).unwrap();
+        let Err(error) = parse_args_from(
+            [
+                OsString::from("--credential-file"),
+                large.as_os_str().to_os_string(),
+                OsString::from("true"),
+            ],
+            None,
+        ) else {
+            panic!("expected an oversized credential file to fail");
+        };
+        let error = error.to_string();
+        let _ = std::fs::remove_file(&large);
+        assert!(error.contains("larger than"), "{error}");
+    }
+
+    #[test]
+    fn resolves_an_environment_credential() {
+        let resolved = resolve_credential(None, None, Some("bob:from-env"), false).unwrap();
+        assert_eq!(resolved.username.as_deref(), Some("bob"));
+        assert_eq!(
+            resolved.credential.as_deref(),
+            Some(encode_credential("bob:from-env").unwrap().as_str())
+        );
+        assert!(resolved.announcement.is_none());
+    }
+
+    #[test]
+    fn take_env_credential_removes_the_variable() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(CREDENTIAL_ENV, "user:from-env");
+        let value = take_env_credential().unwrap();
+        assert!(std::env::var_os(CREDENTIAL_ENV).is_none());
+        assert_eq!(value.as_deref(), Some("user:from-env"));
+
+        std::env::set_var(CREDENTIAL_ENV, "");
+        let error = take_env_credential().unwrap_err().to_string();
+        assert!(std::env::var_os(CREDENTIAL_ENV).is_none());
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    #[test]
+    fn random_credential_uses_a_fixed_username_and_is_announced() {
+        let action = parse_args_from(["--random-credential", "true"], None).unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.username.as_deref(), Some("ttyd"));
+        let announcement = config.login_announcement.expect("announcement");
+        let password = announcement.strip_prefix("ttyd:").expect("ttyd username");
+        assert_eq!(password.len(), 24);
+        assert!(password
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+        assert_eq!(
+            config.credential.as_deref(),
+            Some(encode_credential(&announcement).unwrap().as_str())
+        );
+    }
+}
+
+fn credential_temp_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "ttyd-credential-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ))
 }
