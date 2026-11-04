@@ -99,6 +99,9 @@ ttyd 1 "September 2016" ttyd "User Manual"
   --session-buffer-size <bytes>
       Bytes of output retained for session replay (default: 4194304)
 
+  --history-limit <count>
+      Ended sessions to keep for read-only replay (default: 20, 0 disables history)
+
   -6, --ipv6
       Enable IPv6 support
 
@@ -182,6 +185,21 @@ ttyd -c user:pass bash
   `--session-timeout <seconds>` changes how long a detached session is kept. `0` disables persistence and terminates the command immediately after the last client disconnects. `--session-buffer-size <bytes>` changes the in-memory replay buffer size.
 
   Add `?sessionTimeout=N` to the page URL to override the timeout for that tab (maximum 3600 seconds). The override cannot re-enable persistence when the server was started with `--session-timeout 0`. `-q` / `--exit-no-conn` and `-o` / `--once` keep their existing semantics and may exit before a refreshed page can reconnect.
+
+# SESSION HISTORY
+  Ended sessions are kept in memory for read-only replay. When a session exits, expires, or is deleted, ttyd copies its id, owner, command, exit code, end time, and current replay buffer into a history table before reclaiming the PTY. The PTY is not retained, so a history entry can only be replayed read-only and cannot be reattached as the original shell. The oldest record is dropped when the limit is exceeded, and history disappears when the process restarts. Stored output is bounded by `--session-buffer-size`.
+
+  `--history-limit <count>` sets how many ended sessions are kept (default: 20). `0` disables history.
+
+  A history replay opens `/ws` with the normal handshake JSON plus `"attachOnly": true`. If the id exists, the server replays the stored output frames and then sends frame `4` with `{"readonly":true,"exitCode":N}`; afterwards it discards input and creates no PTY. If the id is not in history, the connection closes without starting a shell. A normal reconnect does not send `attachOnly`, and an expired or archived id keeps today's behavior of starting a new session.
+
+  The session API is served under the base path set by `-b`:
+
+  - `GET /sessions` returns only the current user's running sessions and history. It requires authentication (`-c`, `--credential-file`, `TTYD_CREDENTIAL`, `--random-credential`, or `-H`); when no authentication is configured it returns `404` so session ids are not exposed. With `-c` the credential is shared, so every holder sees the same list.
+  - `GET /sessions/{id}` returns metadata only, without the replay body. Without authentication, knowing the id is enough, like connecting to `/ws` by id. With authentication the session must belong to the current user, otherwise `403`.
+  - `DELETE /sessions/{id}` kills and archives a running session, or deletes a history record. With authentication it must belong to the current user, otherwise `403`. It returns `204` on success and `404` when the id is missing.
+
+  Timestamps are Unix epoch milliseconds (`endedAt`). Killed or expired sessions record exit code `-1`. The browser session panel shows Running and History entries and only appears when `GET /sessions` is available, that is when authentication is configured.
 
 # FILE TRANSFER AND SIXEL
   ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on. File transfer and the probe reply used by `img2sixel` / `lsix` both have to be written back to the PTY, so these examples include `-W`. Install each program in the environment of the command ttyd starts, then try the commands by hand.

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use anyhow::anyhow;
 use anyhow::{bail, Context, Result};
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Extension, Path, Request, State};
 use axum::http::header::{
     ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, COOKIE, HOST,
     LOCATION, PROXY_AUTHENTICATE, SET_COOKIE, WWW_AUTHENTICATE,
@@ -28,7 +28,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 use crate::config::Config;
 use crate::html::HtmlAssets;
-use crate::session::SessionManager;
+use crate::session::{DeleteOutcome, Lookup, SessionManager, SessionSummary};
 use crate::tls::{build_acceptor, ConnInfo, TlsListener};
 use crate::ws;
 
@@ -79,12 +79,19 @@ pub async fn run(config: Config) -> Result<()> {
 }
 
 fn build_router(state: Arc<AppState>) -> Router {
+    let sessions = state.config.endpoints.sessions.clone();
+    let session = format!("{sessions}/{{id}}");
     let mut app = Router::new()
         .route(&state.config.endpoints.index, get(index_handler))
         .route(&state.config.endpoints.token, get(token_handler))
         .route(&state.config.endpoints.login, post(login_handler))
         .route(&state.config.endpoints.logout, post(logout_handler))
-        .route(&state.config.endpoints.ws, get(ws::handler));
+        .route(&state.config.endpoints.ws, get(ws::handler))
+        .route(&sessions, get(sessions_handler))
+        .route(
+            &session,
+            get(session_handler).delete(delete_session_handler),
+        );
 
     if !state.config.endpoints.parent.is_empty() {
         app = app.route(&state.config.endpoints.parent, get(redirect_handler));
@@ -162,6 +169,30 @@ enum AuthFailure {
     ProxyUnauthorized,
 }
 
+fn auth_configured(config: &Config) -> bool {
+    config.credential.is_some() || config.auth_header.is_some()
+}
+
+/// Username used as the session owner. The CLI fills `username` from the
+/// credential, but fall back to decoding it so manually built configurations
+/// keep working too.
+fn auth_username(config: &Config) -> Option<String> {
+    config.username.clone().or_else(|| {
+        let encoded = config.credential.as_deref()?;
+        let bytes = STANDARD.decode(encoded).ok()?;
+        let raw = String::from_utf8(bytes).ok()?;
+        let (username, _) = raw.split_once(':')?;
+        (!username.is_empty()).then(|| username.to_owned())
+    })
+}
+
+fn is_session_path(config: &Config, path: &str) -> bool {
+    path == config.endpoints.sessions
+        || path
+            .strip_prefix(&config.endpoints.sessions)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, AuthFailure> {
     if let Some(name) = &config.auth_header {
         let name =
@@ -178,7 +209,7 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
         if cookie_value(headers, &cookie_name)
             .is_some_and(|token| verify_login_token(credential, token))
         {
-            return Ok(config.username.clone());
+            return Ok(auth_username(config));
         }
 
         let value = headers
@@ -189,7 +220,7 @@ fn check_auth(config: &Config, headers: &HeaderMap) -> Result<Option<String>, Au
             .strip_prefix("Basic ")
             .ok_or(AuthFailure::Unauthorized)?;
         if constant_time_eq(supplied, credential) {
-            return Ok(config.username.clone());
+            return Ok(auth_username(config));
         }
         return Err(AuthFailure::Unauthorized);
     }
@@ -208,7 +239,8 @@ fn unauthorized(config: &Config, request: &Request, failure: AuthFailure) -> Res
             let path = request.uri().path();
             let challenge = path != config.endpoints.token
                 && path != config.endpoints.ws
-                && path != config.endpoints.logout;
+                && path != config.endpoints.logout
+                && !is_session_path(config, path);
             if challenge {
                 (
                     StatusCode::UNAUTHORIZED,
@@ -382,6 +414,101 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         .header(CACHE_CONTROL, "no-store")
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn no_store(status: StatusCode) -> Response {
+    let mut response = status.into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn json_response<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
+    match serde_json::to_vec(value) {
+        Ok(body) => Response::builder()
+            .status(status)
+            .header(CONTENT_TYPE, "application/json;charset=utf-8")
+            .header(CACHE_CONTROL, "no-store")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| no_store(StatusCode::INTERNAL_SERVER_ERROR)),
+        Err(error) => {
+            warn!("failed to serialize session response: {error}");
+            no_store(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct SessionsPayload {
+    sessions: Vec<SessionSummary>,
+    history: Vec<SessionSummary>,
+}
+
+async fn sessions_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    connect: ConnectInfo<ConnInfo>,
+) -> Response {
+    log_http(&state.config.endpoints.sessions, &connect);
+
+    if !auth_configured(&state.config) {
+        return no_store(StatusCode::NOT_FOUND);
+    }
+    let Some(owner) = auth.user.as_deref() else {
+        return no_store(StatusCode::NOT_FOUND);
+    };
+
+    let payload = SessionsPayload {
+        sessions: state.sessions.live_sessions(Some(owner)),
+        history: state.sessions.history_sessions(Some(owner)),
+    };
+    json_response(StatusCode::OK, &payload)
+}
+
+async fn session_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Path(id): Path<String>,
+    connect: ConnectInfo<ConnInfo>,
+) -> Response {
+    log_http(&state.config.endpoints.session(&id), &connect);
+
+    if id.is_empty() || id.len() > 128 {
+        return no_store(StatusCode::NOT_FOUND);
+    }
+
+    match state.sessions.get(&id, auth.user.as_deref()) {
+        Lookup::Found(session) => json_response(StatusCode::OK, &session),
+        Lookup::Forbidden => no_store(StatusCode::FORBIDDEN),
+        Lookup::NotFound => no_store(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn delete_session_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthUser>,
+    Path(id): Path<String>,
+    connect: ConnectInfo<ConnInfo>,
+) -> Response {
+    log_http(&state.config.endpoints.session(&id), &connect);
+
+    if id.is_empty() || id.len() > 128 {
+        return no_store(StatusCode::NOT_FOUND);
+    }
+
+    match state.sessions.delete(&id, auth.user.as_deref()) {
+        DeleteOutcome::Live => {
+            info!("deleted and archived session: {id}");
+            no_store(StatusCode::NO_CONTENT)
+        }
+        DeleteOutcome::History => {
+            info!("deleted history record: {id}");
+            no_store(StatusCode::NO_CONTENT)
+        }
+        DeleteOutcome::Forbidden => no_store(StatusCode::FORBIDDEN),
+        DeleteOutcome::NotFound => no_store(StatusCode::NOT_FOUND),
+    }
 }
 
 fn credentials_match(credential: &str, username: &str, password: &str) -> bool {
@@ -829,8 +956,8 @@ fn log_config(config: &Config) {
     info!("  close signal: {} ({})", config.signal_name, config.signal);
     info!("  terminal type: {}", config.terminal_type);
     info!(
-        "  session timeout: {}s, replay buffer: {} bytes",
-        config.session_timeout, config.session_buffer_size
+        "  session timeout: {}s, replay buffer: {} bytes, history limit: {}",
+        config.session_timeout, config.session_buffer_size, config.history_limit
     );
     if !config.endpoints.parent.is_empty() {
         info!("endpoints:");
@@ -839,6 +966,7 @@ fn log_config(config: &Config) {
         info!("  token    : {}", config.endpoints.token);
         info!("  login    : {}", config.endpoints.login);
         info!("  logout   : {}", config.endpoints.logout);
+        info!("  sessions : {}", config.endpoints.sessions);
         info!("  websocket: {}", config.endpoints.ws);
     }
     if let Some(auth_header) = &config.auth_header {
@@ -942,6 +1070,7 @@ mod protocol_tests {
             serv_buf_size: 4096,
             session_timeout: 30,
             session_buffer_size: crate::pty::DEFAULT_OUTPUT_BUFFER_LIMIT,
+            history_limit: 20,
             ipv6: false,
             ssl: false,
             ssl_cert: None,
@@ -1047,6 +1176,147 @@ mod protocol_tests {
         request
     }
 
+    fn http_request_with_headers(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> String {
+        let mut request =
+            format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+        for (name, value) in headers {
+            request.push_str(name);
+            request.push_str(": ");
+            request.push_str(value);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        request
+    }
+
+    async fn connect_with_headers(addr: SocketAddr, headers: &[(&str, &str)]) -> Client {
+        let mut request = format!("ws://{addr}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", "tty".parse().unwrap());
+        for (name, value) in headers {
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        let (socket, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("websocket handshake failed");
+        socket
+    }
+
+    async fn session_resource(addr: SocketAddr, id: &str, headers: &[(&str, &str)]) -> String {
+        http_request(
+            addr,
+            http_request_with_headers(addr, "GET", &format!("/sessions/{id}"), headers),
+        )
+        .await
+    }
+
+    async fn delete_session_resource(
+        addr: SocketAddr,
+        id: &str,
+        headers: &[(&str, &str)],
+    ) -> String {
+        http_request(
+            addr,
+            http_request_with_headers(addr, "DELETE", &format!("/sessions/{id}"), headers),
+        )
+        .await
+    }
+
+    async fn wait_for_history(
+        addr: SocketAddr,
+        id: &str,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = session_resource(addr, id, headers).await;
+            if response.starts_with("HTTP/1.1 200") {
+                let value: serde_json::Value =
+                    serde_json::from_str(response_body(&response)).unwrap();
+                if value["state"] == "exited" {
+                    return value;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for history {id}: {response}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn history_command() -> Vec<OsString> {
+        if cfg!(windows) {
+            shell("echo history-marker& exit 7")
+        } else {
+            shell("printf 'history-marker\\n'; exit 7")
+        }
+    }
+
+    struct HistoryReplayFrames {
+        output: Vec<u8>,
+        readonly: Option<serde_json::Value>,
+        close_code: Option<u16>,
+    }
+
+    impl HistoryReplayFrames {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.output).into_owned()
+        }
+    }
+
+    async fn read_history_replay(socket: &mut Client) -> HistoryReplayFrames {
+        let mut frames = HistoryReplayFrames {
+            output: Vec::new(),
+            readonly: None,
+            close_code: None,
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if frames.readonly.is_some() || frames.close_code.is_some() {
+                return frames;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for history replay; output {}",
+                frames.text()
+            );
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .expect("timed out waiting for history replay")
+                .expect("socket ended without a frame 4 or close")
+                .expect("websocket error");
+            match message {
+                Message::Binary(data) => match data.first().copied() {
+                    Some(b'0') => frames.output.extend_from_slice(&data[1..]),
+                    Some(b'4') => {
+                        frames.readonly = serde_json::from_slice(&data[1..]).ok();
+                    }
+                    _ => {}
+                },
+                Message::Close(frame) => {
+                    frames.close_code =
+                        Some(frame.map(|frame| u16::from(frame.code)).unwrap_or(1005));
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn http_post_json(addr: SocketAddr, path: &str, body: &str, cookie: Option<&str>) -> String {
         let mut request = format!(
             "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -1123,6 +1393,20 @@ mod protocol_tests {
             body["sessionTimeout"] = serde_json::Value::from(session_timeout);
         }
         Message::Text(body.to_string().into())
+    }
+
+    fn init_message_attach_only(session: &str) -> Message {
+        Message::Text(
+            serde_json::json!({
+                "AuthToken": "",
+                "columns": 80,
+                "rows": 24,
+                "session": session,
+                "attachOnly": true,
+            })
+            .to_string()
+            .into(),
+        )
     }
 
     #[derive(Default)]
@@ -1479,6 +1763,7 @@ mod protocol_tests {
         let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
         let mut config = test_config(shell("exit 0"), "exit");
         config.credential = Some(credential);
+        config.username = Some("user".to_owned());
         config.endpoints = Endpoints::from_base_path(Some("/mounted/here"));
         let (addr, shutdown) = spawn_server(config).await;
 
@@ -1523,6 +1808,30 @@ mod protocol_tests {
             response.starts_with("HTTP/1.1 200"),
             "response was {response}"
         );
+
+        let response = http_request(addr, http_get(addr, "/mounted/here/sessions", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "www-authenticate").is_none());
+
+        let response = http_request(
+            addr,
+            http_get(addr, "/mounted/here/sessions", Some(&cookie)),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(response_body(&response)).unwrap()["history"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+
         shutdown.cancel();
     }
 
@@ -1641,6 +1950,21 @@ mod protocol_tests {
         secure_headers.insert("x-forwarded-proto", "https".parse().unwrap());
         let cookie = super::build_login_cookie(&config, &secure_headers, &token, true);
         assert!(cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn derives_the_session_owner_from_the_credential() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let mut config = test_config(Vec::new(), "");
+        config.credential = Some(credential);
+        assert_eq!(super::auth_username(&config).as_deref(), Some("user"));
+
+        config.username = Some("custom".to_owned());
+        assert_eq!(super::auth_username(&config).as_deref(), Some("custom"));
+
+        config.credential = None;
+        config.username = None;
+        assert!(super::auth_username(&config).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1790,5 +2114,242 @@ mod protocol_tests {
         shutdown.cancel();
 
         assert_ne!(frames.session.as_deref(), Some(session.as_str()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_is_available_without_auth_and_replays_read_only() {
+        let mut config = test_config(history_command(), "history");
+        // ConPTY on Windows only runs the command after a cursor-position reply,
+        // which the server forwards when the session is writable.
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut socket = connect(addr, None).await;
+        read_initial(&mut socket).await;
+        socket.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut socket, |frames| frames.session.is_some()).await;
+        let id = frames.session.clone().expect("session id");
+        let end = finish(&mut socket, None).await;
+        assert_eq!(end.close_code, CLOSE_ERROR);
+
+        let record = wait_for_history(addr, &id, &[]).await;
+        assert_eq!(record["state"], "exited");
+        assert_eq!(record["exitCode"].as_i64(), Some(7));
+        assert_eq!(record["command"], "history");
+        assert!(record["endedAt"].as_u64().is_some_and(|ended| ended > 0));
+        assert!(record.get("output").is_none());
+
+        let response = http_request(addr, http_get(addr, "/sessions", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "response was {response}"
+        );
+
+        // Normal reconnects without attachOnly keep the old behavior: the
+        // archived id starts a fresh session with a new id.
+        let mut reconnect = connect(addr, None).await;
+        read_initial(&mut reconnect).await;
+        reconnect
+            .send(init_message_with_session("", Some(&id), Some(30)))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut reconnect, |frames| frames.session.is_some()).await;
+        let replacement = frames.session.clone().expect("replacement session");
+        assert_ne!(replacement, id);
+        let end = finish(&mut reconnect, None).await;
+        assert_eq!(end.close_code, CLOSE_ERROR);
+
+        // attachOnly replays the history, sends frame 4, and does not start a PTY.
+        let mut replay = connect(addr, None).await;
+        read_initial(&mut replay).await;
+        replay.send(init_message_attach_only(&id)).await.unwrap();
+        let frames = read_history_replay(&mut replay).await;
+        assert!(
+            frames.text().contains("history-marker"),
+            "replay was {}",
+            frames.text()
+        );
+        let readonly = frames.readonly.expect("frame 4");
+        assert_eq!(readonly["readonly"], true);
+        assert_eq!(readonly["exitCode"].as_i64(), Some(7));
+        assert_eq!(frames.close_code, None);
+
+        // Input after frame 4 is discarded and must not spawn a new PTY.
+        replay
+            .send(Message::Binary(b"0ignored\r\n".to_vec().into()))
+            .await
+            .unwrap();
+        let extra = tokio::time::timeout(Duration::from_millis(400), replay.next()).await;
+        assert!(extra.is_err(), "history replay produced output after input");
+        replay.close(None).await.unwrap();
+
+        // Unknown history ids close without falling back to a new PTY.
+        let mut missing = connect(addr, None).await;
+        read_initial(&mut missing).await;
+        missing
+            .send(init_message_attach_only("missing-history-id"))
+            .await
+            .unwrap();
+        let frames = read_history_replay(&mut missing).await;
+        assert!(frames.readonly.is_none());
+        assert_eq!(frames.close_code, Some(CLOSE_NORMAL));
+
+        // Deleting the history record makes it unavailable.
+        let response = delete_session_resource(addr, &id, &[]).await;
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "response was {response}"
+        );
+        let response = session_resource(addr, &id, &[]).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "response was {response}"
+        );
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_credential_lists_sessions_and_requires_auth() {
+        let credential = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.credential = Some(credential.clone());
+        config.username = Some("user".to_owned());
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut socket = connect(addr, Some(&credential)).await;
+        read_initial(&mut socket).await;
+        socket.send(init_message(&credential)).await.unwrap();
+        let frames = read_session_frames(&mut socket, |frames| frames.session.is_some()).await;
+        let id = frames.session.clone().expect("session id");
+
+        let response = http_request(addr, http_get(addr, "/sessions", None)).await;
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "response was {response}"
+        );
+        assert!(header_value(&response, "www-authenticate").is_none());
+
+        let authorization = format!("Basic {credential}");
+        let response = http_request(
+            addr,
+            http_request_with_headers(
+                addr,
+                "GET",
+                "/sessions",
+                &[("Authorization", &authorization)],
+            ),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+        let sessions = body["sessions"].as_array().expect("sessions array");
+        assert!(sessions
+            .iter()
+            .any(|session| session["id"].as_str() == Some(id.as_str())));
+        assert_eq!(body["history"].as_array().map(Vec::len), Some(0));
+        assert!(sessions.iter().all(|session| session["owner"] == "user"));
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reverse_proxy_auth_scopes_sessions_and_owner_checks() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.auth_header = Some("x-user".to_owned());
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let alice_headers = [("x-user", "alice")];
+        let bob_headers = [("x-user", "bob")];
+
+        let mut alice = connect_with_headers(addr, &alice_headers).await;
+        read_initial(&mut alice).await;
+        alice.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut alice, |frames| frames.session.is_some()).await;
+        let alice_id = frames.session.clone().expect("alice session");
+
+        let mut bob = connect_with_headers(addr, &bob_headers).await;
+        read_initial(&mut bob).await;
+        bob.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut bob, |frames| frames.session.is_some()).await;
+        let bob_id = frames.session.clone().expect("bob session");
+
+        let response = http_request(
+            addr,
+            http_request_with_headers(addr, "GET", "/sessions", &alice_headers),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "response was {response}"
+        );
+        let body: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+        let sessions = body["sessions"].as_array().expect("sessions array");
+        assert!(sessions
+            .iter()
+            .any(|session| session["id"].as_str() == Some(alice_id.as_str())));
+        assert!(!sessions
+            .iter()
+            .any(|session| session["id"].as_str() == Some(bob_id.as_str())));
+        assert_eq!(body["history"].as_array().map(Vec::len), Some(0));
+
+        // Cross-user metadata and deletion are refused.
+        let response = session_resource(addr, &bob_id, &alice_headers).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "response was {response}"
+        );
+        let response = delete_session_resource(addr, &bob_id, &alice_headers).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "response was {response}"
+        );
+
+        // The owner can delete a live session; it is killed and archived.
+        let response = delete_session_resource(addr, &bob_id, &bob_headers).await;
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "response was {response}"
+        );
+        let record = wait_for_history(addr, &bob_id, &bob_headers).await;
+        assert_eq!(record["owner"], "bob");
+        assert_eq!(record["exitCode"].as_i64(), Some(-1));
+
+        let response = session_resource(addr, &bob_id, &alice_headers).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "response was {response}"
+        );
+
+        shutdown.cancel();
+        drop(alice);
+        drop(bob);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_history_limit_does_not_keep_ended_sessions() {
+        let mut config = test_config(history_command(), "history");
+        config.history_limit = 0;
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut socket = connect(addr, None).await;
+        read_initial(&mut socket).await;
+        socket.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut socket, |frames| frames.session.is_some()).await;
+        let id = frames.session.clone().expect("session id");
+        let _ = finish(&mut socket, None).await;
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let response = session_resource(addr, &id, &[]).await;
+        assert!(
+            response.starts_with("HTTP/1.1 404"),
+            "response was {response}"
+        );
+
+        shutdown.cancel();
     }
 }

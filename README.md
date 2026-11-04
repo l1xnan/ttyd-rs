@@ -21,6 +21,7 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 - Run any custom command with options
 - Web login with optional 30-day "remember me", Basic authentication, and reverse-proxy header authentication
 - Resumable sessions: reloading a tab reattaches to the same PTY with recent output replayed
+- Session history: ended sessions are kept in memory for read-only replay, see [Session persistence](#session-persistence)
 - IPv4, IPv6, TCP and UNIX domain sockets
 - Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, `-s` does not deliver a POSIX signal and there is no process group; the child is terminated instead
 
@@ -125,6 +126,7 @@ OPTIONS:
     -f, --srv-buf-size      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)
         --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)
         --session-buffer-size  Bytes of output retained for session replay (default: 4194304)
+        --history-limit        Ended sessions to keep for read-only replay (default: 20, 0 disables history)
     -6, --ipv6              Enable IPv6 support
     -S, --ssl               Enable SSL
     -C, --ssl-cert          SSL certificate file path
@@ -191,6 +193,47 @@ each tab has its own session and opening a new tab starts a fresh command.
   server was started with `--session-timeout 0`.
 - `-q` / `--exit-no-conn` and `-o` / `--once` keep their existing semantics and
   may exit before a refreshed page can reconnect.
+
+Ended sessions are also kept for read-only replay. When a session exits,
+expires, or is deleted, ttyd copies its id, owner, command, exit code, end time,
+and current replay buffer into an in-memory history table before reclaiming the
+PTY. The PTY itself is not retained, so a history entry can only be replayed
+read-only and cannot be reattached as the original shell. The oldest record is
+dropped when the limit is exceeded, and history disappears when the process
+restarts. Stored output is the same replay buffer, still bounded by
+`--session-buffer-size`.
+
+- `--history-limit <count>` sets how many ended sessions are kept (default: 20).
+  `0` disables history.
+- A history replay opens `/ws` with the normal handshake JSON plus
+  `"attachOnly": true`. If the id exists, the server replays the stored output
+  frames and then sends frame `4` with `{"readonly":true,"exitCode":N}`;
+  afterwards it discards input and creates no PTY. If the id is not in history,
+  the connection closes without starting a shell. A normal reconnect does not
+  send `attachOnly`, and an expired or archived id keeps today's behavior of
+  starting a new session.
+- The session panel lists Running (running sessions not opened on this page;
+  click to attach) and History (ended sessions; read-only replay, delete
+  record). It only appears when `GET /sessions` is available, that is when
+  authentication is configured. The page's own tab title prefers the locally
+  remembered shell title; server list entries use the launch command.
+
+Session API routes are served under the base path set by `-b`:
+
+- `GET /sessions` returns only the current user's running sessions and history.
+  It requires authentication (`-c`, `--credential-file`, `TTYD_CREDENTIAL`,
+  `--random-credential`, or `-H`). When no authentication is configured it
+  returns `404` so session ids are not exposed. With `-c` the credential is
+  shared, so every holder sees the same list.
+- `GET /sessions/{id}` returns metadata only, without the replay body. Without
+  authentication, knowing the id is enough, like connecting to `/ws` by id.
+  With authentication the session must belong to the current user, otherwise
+  `403`.
+- `DELETE /sessions/{id}` kills and archives a running session, or deletes a
+  history record. With authentication it must belong to the current user,
+  otherwise `403`. It returns `204` on success and `404` when the id is missing.
+- Timestamps are Unix epoch milliseconds (`endedAt`). Killed or expired
+  sessions record exit code `-1`.
 
 ## File transfer and Sixel
 

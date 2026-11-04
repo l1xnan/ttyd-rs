@@ -9,6 +9,7 @@ import { ImageAddon } from '@xterm/addon-image';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
 import { ZmodemAddon } from './addons/zmodem';
+import { buildHandshake, parseReadonlyFrame } from './handshake';
 import { activePreferenceEntries, parseQueryOptions, type ClientOptions, type RendererType } from './prefs';
 import { sixelPrimaryDeviceAttributes } from './sixel';
 
@@ -32,6 +33,7 @@ enum Command {
     SET_WINDOW_TITLE = '1',
     SET_PREFERENCES = '2',
     SET_SESSION = '3',
+    READONLY = '4',
 
     // client side
     INPUT = '0',
@@ -51,14 +53,18 @@ export interface FlowControl {
 export interface XtermOptions {
     wsUrl: string;
     tokenUrl: string;
+    sessionsUrl: string;
     flowControl: FlowControl;
     clientOptions: ClientOptions;
     termOptions: ITerminalOptions;
     sessionTimeout: number;
     onAuthRequired?: () => void;
+    onSessionChange?: (id: string | undefined) => void;
+    onHistoryChange?: (id: string | undefined) => void;
 }
 
 const SESSION_STORAGE_KEY = `ttyd.session:${window.location.pathname.replace(/[/]+$/, '') || '/'}`;
+const DEFAULT_TITLE = 'ttyd - Terminal';
 
 function toDisposable(f: () => void): IDisposable {
     return { dispose: f };
@@ -86,6 +92,7 @@ export class Xterm {
     private sixelInstalled = false;
 
     private socket?: WebSocket;
+    private socketDisposables: IDisposable[] = [];
     private token: string;
     private opened = false;
     private title?: string;
@@ -95,6 +102,15 @@ export class Xterm {
     private doReconnect = true;
     private closeOnDisconnect = false;
     private sessionId?: string;
+
+    /// Read-only history replay state. `attachOnly` selects the replay
+    /// handshake; `requestedSession` is the history id, never the live id.
+    private readOnly = false;
+    private attachOnly = false;
+    private requestedSession?: string;
+    private exitCode?: number;
+    private historyCommand?: string;
+    private connectNotice?: string;
 
     private writeFunc = (data: ArrayBuffer) => this.writeData(new Uint8Array(data));
 
@@ -108,6 +124,7 @@ export class Xterm {
             d.dispose();
         }
         this.disposables.length = 0;
+        this.socketDisposables.length = 0;
         this.zmodemAddon = undefined;
         this.sixelInstalled = false;
         this.writeFunc = data => this.writeData(new Uint8Array(data));
@@ -117,12 +134,100 @@ export class Xterm {
     public close() {
         this.reconnect = false;
         this.doReconnect = false;
+        this.teardownSocket();
+        this.dispose();
+    }
+
+    /**
+     * Drop the current WebSocket listeners before closing it. This keeps the
+     * old socket's close event from reconnecting or clobbering the session
+     * state when the user switches to another session.
+     */
+    private teardownSocket() {
         const socket = this.socket;
         this.socket = undefined;
+        for (const disposable of this.socketDisposables) {
+            disposable.dispose();
+        }
+        this.socketDisposables.length = 0;
         if (socket && socket.readyState < WebSocket.CLOSING) {
             socket.close();
         }
+    }
+
+    /// Attach this tab to a live session.
+    @bind
+    public attachSession(id: string) {
+        if (!id || !this.terminal) return;
+
+        const { terminal } = this;
+        this.teardownSocket();
         this.dispose();
+        this.attachOnly = false;
+        this.readOnly = false;
+        this.requestedSession = undefined;
+        this.exitCode = undefined;
+        this.historyCommand = undefined;
+        this.connectNotice = 'Attached';
+        terminal.options.disableStdin = false;
+        this.clearShellTitle();
+        this.rememberSession(id);
+        this.options.onHistoryChange?.(undefined);
+        this.options.onSessionChange?.(this.sessionId);
+        this.connect();
+    }
+
+    /// Show a read-only replay of an ended session.
+    @bind
+    public replayHistory(id: string, command: string) {
+        if (!id || !this.terminal) return;
+
+        const { terminal } = this;
+        this.teardownSocket();
+        this.dispose();
+        this.attachOnly = true;
+        this.readOnly = true;
+        this.requestedSession = id;
+        this.historyCommand = command !== undefined && command !== '' ? command : id;
+        this.exitCode = undefined;
+        this.connectNotice = undefined;
+        // A history id must never become the live session, so keep it out of
+        // sessionStorage and clear the in-memory live id only.
+        this.sessionId = undefined;
+        terminal.options.disableStdin = true;
+        terminal.reset();
+        this.clearShellTitle();
+        document.title = `${this.historyCommand} (ended)`;
+        this.options.onSessionChange?.(undefined);
+        this.options.onHistoryChange?.(id);
+        this.connect();
+    }
+
+    /// Detach from the current session and start a brand new one.
+    @bind
+    public newSession() {
+        if (!this.terminal) return;
+
+        const { terminal } = this;
+        this.teardownSocket();
+        this.dispose();
+        this.attachOnly = false;
+        this.readOnly = false;
+        this.requestedSession = undefined;
+        this.exitCode = undefined;
+        this.historyCommand = undefined;
+        this.connectNotice = 'New session';
+        terminal.options.disableStdin = false;
+        this.clearShellTitle();
+        this.forgetSession();
+        this.options.onSessionChange?.(undefined);
+        this.options.onHistoryChange?.(undefined);
+        this.connect();
+    }
+
+    private clearShellTitle() {
+        this.title = undefined;
+        document.title = this.titleFixed ?? DEFAULT_TITLE;
     }
 
     @bind
@@ -168,6 +273,8 @@ export class Xterm {
 
     @bind
     private onWindowUnload(event: BeforeUnloadEvent) {
+        // A read-only history view has no PTY to terminate.
+        if (this.readOnly) return undefined;
         if (this.socket?.readyState !== WebSocket.OPEN) return undefined;
         // With session persistence enabled, refreshing or reopening this tab
         // restores the same PTY, so there is nothing to warn about.
@@ -248,6 +355,8 @@ export class Xterm {
         const { terminal, fitAddon, overlayAddon, register, sendData } = this;
         register(
             terminal.onTitleChange(data => {
+                // The ended-history title is set from the replay frame instead.
+                if (this.readOnly) return;
                 if (data && data !== '' && !this.titleFixed) {
                     document.title = data + ' | ' + this.title;
                 }
@@ -255,12 +364,14 @@ export class Xterm {
         );
         register(
             terminal.onData(data => {
+                if (this.readOnly) return;
                 if (this.zmodemAddon?.handleTerminalInput(data)) return;
                 sendData(data);
             })
         );
         register(
             terminal.onBinary(data => {
+                if (this.readOnly) return;
                 if (this.zmodemAddon?.handleBinaryInput(data)) return;
                 sendData(Uint8Array.from(data, v => v.charCodeAt(0)));
             })
@@ -296,13 +407,15 @@ export class Xterm {
         if (this.written > limit) {
             terminal.write(data, () => {
                 this.pending = Math.max(this.pending - 1, 0);
-                if (this.pending < lowWater) {
+                // Flow control is pointless on the read-only replay socket and
+                // sending frame '3' there is not allowed.
+                if (this.pending < lowWater && !this.readOnly) {
                     this.socket?.send(textEncoder.encode(Command.RESUME));
                 }
             });
             this.pending++;
             this.written = 0;
-            if (this.pending > highWater) {
+            if (this.pending > highWater && !this.readOnly) {
                 this.socket?.send(textEncoder.encode(Command.PAUSE));
             }
         } else {
@@ -312,6 +425,8 @@ export class Xterm {
 
     @bind
     public sendData(data: string | Uint8Array) {
+        // The replay socket discards input; keep the view strictly read-only.
+        if (this.readOnly) return;
         const { socket, textEncoder } = this;
         if (socket?.readyState !== WebSocket.OPEN) return;
 
@@ -330,14 +445,15 @@ export class Xterm {
 
     @bind
     public connect() {
+        this.teardownSocket();
         this.socket = new WebSocket(this.options.wsUrl, ['tty']);
         const { socket, register } = this;
 
         socket.binaryType = 'arraybuffer';
-        register(addEventListener(socket, 'open', this.onSocketOpen));
-        register(addEventListener(socket, 'message', this.onSocketData as EventListener));
-        register(addEventListener(socket, 'close', this.onSocketClose as EventListener));
-        register(addEventListener(socket, 'error', () => (this.doReconnect = false)));
+        this.socketDisposables.push(register(addEventListener(socket, 'open', this.onSocketOpen)));
+        this.socketDisposables.push(register(addEventListener(socket, 'message', this.onSocketData as EventListener)));
+        this.socketDisposables.push(register(addEventListener(socket, 'close', this.onSocketClose as EventListener)));
+        this.socketDisposables.push(register(addEventListener(socket, 'error', () => (this.doReconnect = false))));
     }
 
     @bind
@@ -345,26 +461,38 @@ export class Xterm {
         console.log('[ttyd] websocket connection opened');
 
         const { textEncoder, terminal, overlayAddon } = this;
-        const session = this.sessionId ?? this.storedSession();
-        if (session) {
+        const session = this.attachOnly ? this.requestedSession : (this.sessionId ?? this.storedSession());
+        if (!this.attachOnly && session) {
             this.sessionId = session;
         }
-        const msg = JSON.stringify({
-            AuthToken: this.token,
+        const msg = buildHandshake({
+            token: this.token,
             columns: terminal.cols,
             rows: terminal.rows,
             session,
             sessionTimeout: this.sessionTimeout(),
+            attachOnly: this.attachOnly,
         });
         this.socket?.send(textEncoder.encode(msg));
 
-        if (this.opened) {
+        if (this.attachOnly) {
+            this.readOnly = true;
+            terminal.reset();
+            terminal.options.disableStdin = true;
+            overlayAddon.showOverlay('Read-only history');
+            this.options.onSessionChange?.(undefined);
+        } else {
+            this.readOnly = false;
             terminal.reset();
             terminal.options.disableStdin = false;
-            overlayAddon.showOverlay('Reconnected', 300);
-        } else {
-            this.opened = true;
+            if (this.connectNotice) {
+                overlayAddon.showOverlay(this.connectNotice, 300);
+                this.connectNotice = undefined;
+            } else if (this.opened) {
+                overlayAddon.showOverlay('Reconnected', 300);
+            }
         }
+        this.opened = true;
 
         this.doReconnect = this.reconnect;
         this.initListeners();
@@ -375,13 +503,29 @@ export class Xterm {
     private onSocketClose(event: CloseEvent) {
         console.log(`[ttyd] websocket connection closed with code: ${event.code}`);
 
+        const wasHistory = this.readOnly || this.attachOnly;
         const { refreshToken, connect, doReconnect, overlayAddon } = this;
         overlayAddon.showOverlay('Connection Closed');
         this.dispose();
 
+        // A history replay is a read-only snapshot: never reconnect and never
+        // offer "Press Enter". This is handled before the 1008 forgetSession
+        // below, so a forbidden replay keeps the stored live session.
+        if (wasHistory) {
+            if (this.exitCode !== undefined) {
+                const code = this.exitCode < 0 ? 'unknown' : String(this.exitCode);
+                overlayAddon.showOverlay(`History ended · exit ${code}`);
+            } else {
+                overlayAddon.showOverlay('Session not found');
+            }
+            this.options.onHistoryChange?.(undefined);
+            return;
+        }
+
         // 1008: CLOSE_POLICY. The stored session cannot be used by this user.
         if (event.code === 1008) {
             this.forgetSession();
+            this.options.onSessionChange?.(undefined);
         }
 
         // 1000: CLOSE_NORMAL
@@ -431,7 +575,13 @@ export class Xterm {
 
         switch (cmd) {
             case Command.OUTPUT:
-                this.writeFunc(data);
+                // History output bypasses the zmodem parser so the replay is
+                // always rendered verbatim.
+                if (this.readOnly) {
+                    this.writeData(new Uint8Array(data));
+                } else {
+                    this.writeFunc(data);
+                }
                 break;
             case Command.SET_WINDOW_TITLE:
                 this.title = textDecoder.decode(data);
@@ -445,12 +595,37 @@ export class Xterm {
                 } as Preferences);
                 break;
             case Command.SET_SESSION:
+                // A replay connection never creates a PTY, so its id is not a
+                // live session and must not be remembered.
+                if (this.attachOnly) break;
                 this.rememberSession(textDecoder.decode(data));
+                this.options.onSessionChange?.(this.sessionId);
+                break;
+            case Command.READONLY:
+                this.handleReadonlyFrame(new Uint8Array(data));
                 break;
             default:
                 console.warn(`[ttyd] unknown command: ${cmd}`);
                 break;
         }
+    }
+
+    @bind
+    private handleReadonlyFrame(bytes: Uint8Array) {
+        const frame = parseReadonlyFrame(bytes);
+        if (!frame) {
+            console.warn('[ttyd] invalid read-only replay frame');
+            return;
+        }
+
+        const { terminal, overlayAddon } = this;
+        this.readOnly = true;
+        this.exitCode = frame.exitCode;
+        terminal.options.disableStdin = true;
+        const command = this.historyCommand ?? 'History';
+        document.title = `${command} (ended)`;
+        const code = frame.exitCode < 0 ? 'unknown' : String(frame.exitCode);
+        overlayAddon.showOverlay(`Read-only · exit ${code}`);
     }
 
     @bind

@@ -11,6 +11,7 @@ const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const path = window.location.pathname.replace(/[/]+$/, '');
 const wsUrl = [protocol, '//', window.location.host, path, '/ws', window.location.search].join('');
 const tokenUrl = [window.location.protocol, '//', window.location.host, path, '/token'].join('');
+const sessionsUrl = [window.location.protocol, '//', window.location.host, path, '/sessions'].join('');
 const loginUrl = [window.location.protocol, '//', window.location.host, path, '/login'].join('');
 const logoutUrl = [window.location.protocol, '//', window.location.host, path, '/logout'].join('');
 const clientOptions: ClientOptions = { ...DEFAULT_CLIENT_OPTIONS };
@@ -198,6 +199,7 @@ export class App extends Component<{}, State> {
                     id="terminal-container"
                     wsUrl={wsUrl}
                     tokenUrl={tokenUrl}
+                    sessionsUrl={sessionsUrl}
                     clientOptions={clientOptions}
                     termOptions={termOptions}
                     flowControl={flowControl}

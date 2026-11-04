@@ -226,8 +226,11 @@ impl PtySession {
                     Ok(status) => status.exit_code() as i32,
                     Err(_) => -1,
                 };
+                // Publish the code before `exited` so a reaper that observes
+                // `is_exited()` can always read the exit code. `send_replace`
+                // also updates the value when no client is subscribed yet.
+                waiter_status.send_replace(SessionStatus::Exited(code));
                 waiter_exited.store(true, Ordering::SeqCst);
-                let _ = waiter_status.send(SessionStatus::Exited(code));
             })
             .context("failed to start PTY wait thread")?;
 
@@ -267,6 +270,14 @@ impl PtySession {
 
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Exit code of the child, once it has been reaped.
+    pub fn exit_code(&self) -> Option<i32> {
+        match *self.status.borrow() {
+            SessionStatus::Exited(code) => Some(code),
+            SessionStatus::Running => None,
+        }
     }
 
     pub fn try_write(&self, data: Vec<u8>) -> Result<(), InputReject> {
@@ -368,6 +379,7 @@ mod tests {
             serv_buf_size: 4096,
             session_timeout: 30,
             session_buffer_size: DEFAULT_OUTPUT_BUFFER_LIMIT,
+            history_limit: 20,
             ipv6: false,
             ssl: false,
             ssl_cert: None,

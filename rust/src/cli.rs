@@ -43,6 +43,7 @@ fn parse_args_from(
     let mut serv_buf_size = 4096usize;
     let mut session_timeout = 30u64;
     let mut session_buffer_size = crate::pty::DEFAULT_OUTPUT_BUFFER_LIMIT;
+    let mut history_limit = 20usize;
     let mut ipv6 = false;
     let mut ssl = false;
     let mut ssl_cert: Option<PathBuf> = None;
@@ -117,6 +118,9 @@ fn parse_args_from(
                 }
                 "session-buffer-size" => {
                     session_buffer_size = parse_unsigned("session-buffer-size", &take_value(name)?)?
+                }
+                "history-limit" => {
+                    history_limit = parse_unsigned("history-limit", &take_value(name)?)?
                 }
                 "ipv6" => ipv6 = true,
                 "ssl" => ssl = true,
@@ -334,6 +338,7 @@ fn parse_args_from(
         } else {
             session_buffer_size
         },
+        history_limit,
         ipv6,
         ssl,
         ssl_cert,
@@ -658,6 +663,7 @@ OPTIONS:\n\
     -f, --srv-buf-size      Maximum bytes read from the PTY at once, a larger value may improve throughput (default: 4096)\n\
         --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)\n\
         --session-buffer-size  Bytes of output retained for session replay (default: 4194304)\n\
+        --history-limit        Ended sessions to keep for read-only replay (default: 20, 0 disables history)\n\
     -6, --ipv6              Enable IPv6 support\n\
     -S, --ssl               Enable SSL\n\
     -C, --ssl-cert          SSL certificate file path\n\
@@ -768,6 +774,29 @@ mod tests {
         assert_eq!(prefs["enableTrzsz"], true);
         assert_eq!(prefs["enableSixel"], true);
         assert_eq!(prefs["trzszDragInitTimeout"], 1500);
+    }
+
+    #[test]
+    fn parses_history_limit() {
+        let action = parse_args_from(["true"], None).unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.history_limit, 20);
+
+        let action = parse_args_from(["--history-limit", "0", "true"], None).unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.history_limit, 0);
+
+        let action = parse_args_from(["--history-limit=7", "true"], None).unwrap();
+        let Action::Run(config) = action else {
+            panic!("expected a running configuration");
+        };
+        assert_eq!(config.history_limit, 7);
+
+        assert!(parse_args_from(["--history-limit", "-1", "true"], None).is_err());
     }
 
     #[test]
@@ -925,15 +954,15 @@ mod tests {
             Some(encode_credential(&announcement).unwrap().as_str())
         );
     }
-}
 
-fn credential_temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "ttyd-credential-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ))
+    fn credential_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ttyd-credential-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
 }

@@ -19,7 +19,7 @@ use url::Url;
 use crate::config::hostname;
 use crate::pty::{InputReject, PtySession, SessionEvent, SessionStatus, MAX_INPUT_FRAME};
 use crate::server::{peer_string, AppState, AuthUser};
-use crate::session::{AttachError, AttachRequest, ManagedSession, SessionManager};
+use crate::session::{AttachError, AttachRequest, Lookup, ManagedSession, SessionManager};
 use crate::tls::ConnInfo;
 
 pub(crate) const CLOSE_NORMAL: u16 = 1000;
@@ -127,6 +127,7 @@ struct Initial {
     rows: u16,
     session: Option<String>,
     session_timeout: Option<u64>,
+    attach_only: bool,
 }
 
 /// Keeps a session attached for as long as the WebSocket lifetime, even when
@@ -198,6 +199,17 @@ async fn run_socket(
         initial.columns
     };
     let mut rows = if initial.rows == 0 { 24 } else { initial.rows };
+
+    if initial.attach_only {
+        replay_history(
+            &mut socket,
+            &state,
+            initial.session.as_deref(),
+            user.as_deref(),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let timeout = state.sessions.resolve_timeout(initial.session_timeout);
     let (session, created) = match state.sessions.attach_or_create(AttachRequest {
@@ -451,6 +463,60 @@ async fn run_socket(
     Ok(())
 }
 
+async fn replay_history(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+    session_id: Option<&str>,
+    owner: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(session_id) = session_id else {
+        close(socket, CLOSE_NORMAL).await;
+        return Ok(());
+    };
+
+    match state.sessions.history_for(session_id, owner) {
+        Lookup::NotFound => {
+            info!("history not found for session: {session_id}");
+            close(socket, CLOSE_NORMAL).await;
+            Ok(())
+        }
+        Lookup::Forbidden => {
+            warn!("refuse to replay a history owned by another user");
+            close(socket, CLOSE_POLICY).await;
+            Ok(())
+        }
+        Lookup::Found(replay) => {
+            info!("replaying history for session: {session_id}");
+            send_replay(socket, &replay.output).await?;
+            let body = serde_json::json!({
+                "readonly": true,
+                "exitCode": replay.exit_code,
+            })
+            .to_string();
+            send_frame(socket, b'4', body.as_bytes()).await?;
+
+            // The replay is complete. Keep the connection open so the client
+            // can display the read-only output, but discard every input
+            // message and never create a PTY.
+            loop {
+                tokio::select! {
+                    _ = state.shutdown.cancelled() => {
+                        close(socket, CLOSE_GOING_AWAY).await;
+                        return Ok(());
+                    }
+                    message = socket.recv() => {
+                        match message {
+                            Some(Ok(Message::Close(_))) | None => return Ok(()),
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => return Err(error.into()),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 enum Control {
     Continue,
     Close,
@@ -597,11 +663,16 @@ async fn wait_initial(
             .filter(|session| !session.is_empty() && session.len() <= 128)
             .map(str::to_owned);
         let session_timeout = value.get("sessionTimeout").and_then(Value::as_u64);
+        let attach_only = value
+            .get("attachOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         return Ok(Some(Initial {
             columns,
             rows,
             session,
             session_timeout,
+            attach_only,
         }));
     }
 }

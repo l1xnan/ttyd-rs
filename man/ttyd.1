@@ -136,6 +136,10 @@ Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, -s does not deli
       Bytes of output retained for session replay (default: 4194304)
 
 .PP
+--history-limit
+      Ended sessions to keep for read-only replay (default: 20, 0 disables history)
+
+.PP
 -6, --ipv6
       Enable IPv6 support
 
@@ -252,6 +256,33 @@ By default a detached PTY is kept for 30 seconds. Reloading the page reattaches 
 
 .PP
 Add \fB\fC?sessionTimeout=N\fR to the page URL to override the timeout for that tab (maximum 3600 seconds). The override cannot re-enable persistence when the server was started with \fB\fC--session-timeout 0\fR. \fB\fC-q\fR / \fB\fC--exit-no-conn\fR and \fB\fC-o\fR / \fB\fC--once\fR keep their existing semantics and may exit before a refreshed page can reconnect.
+
+
+.SH SESSION HISTORY
+.PP
+Ended sessions are kept in memory for read-only replay. When a session exits, expires, or is deleted, ttyd copies its id, owner, command, exit code, end time, and current replay buffer into a history table before reclaiming the PTY. The PTY is not retained, so a history entry can only be replayed read-only and cannot be reattached as the original shell. The oldest record is dropped when the limit is exceeded, and history disappears when the process restarts. Stored output is bounded by \fB\fC--session-buffer-size\fR.
+
+.PP
+\fB\fC--history-limit <count>\fR sets how many ended sessions are kept (default: 20). \fB\fC0\fR disables history.
+
+.PP
+A history replay opens \fB\fC/ws\fR with the normal handshake JSON plus \fB\fC"attachOnly": true\fR. If the id exists, the server replays the stored output frames and then sends frame \fB\fC4\fR with \fB\fC{"readonly":true,"exitCode":N}\fR; afterwards it discards input and creates no PTY. If the id is not in history, the connection closes without starting a shell. A normal reconnect does not send \fB\fCattachOnly\fR, and an expired or archived id keeps today's behavior of starting a new session.
+
+.PP
+The session API is served under the base path set by \fB\fC-b\fR:
+
+.RS
+.IP \(bu 2
+\fB\fCGET /sessions\fR returns only the current user's running sessions and history. It requires authentication (\fB\fC-c\fR, \fB\fC--credential-file\fR, \fB\fCTTYD_CREDENTIAL\fR, \fB\fC--random-credential\fR, or \fB\fC-H\fR); when no authentication is configured it returns \fB\fC404\fR so session ids are not exposed. With \fB\fC-c\fR the credential is shared, so every holder sees the same list.
+.IP \(bu 2
+\fB\fCGET /sessions/{id}\fR returns metadata only, without the replay body. Without authentication, knowing the id is enough, like connecting to \fB\fC/ws\fR by id. With authentication the session must belong to the current user, otherwise \fB\fC403\fR.
+.IP \(bu 2
+\fB\fCDELETE /sessions/{id}\fR kills and archives a running session, or deletes a history record. With authentication it must belong to the current user, otherwise \fB\fC403\fR. It returns \fB\fC204\fR on success and \fB\fC404\fR when the id is missing.
+
+.RE
+
+.PP
+Timestamps are Unix epoch milliseconds (\fB\fCendedAt\fR). Killed or expired sessions record exit code \fB\fC-1\fR. The browser session panel shows Running and History entries and only appears when \fB\fCGET /sessions\fR is available, that is when authentication is configured.
 
 
 .SH FILE TRANSFER AND SIXEL

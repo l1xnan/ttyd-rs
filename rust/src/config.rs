@@ -10,6 +10,7 @@ pub struct Endpoints {
     pub token: String,
     pub login: String,
     pub logout: String,
+    pub sessions: String,
     pub parent: String,
 }
 
@@ -23,6 +24,7 @@ impl Endpoints {
                 token: "/token".to_owned(),
                 login: "/login".to_owned(),
                 logout: "/logout".to_owned(),
+                sessions: "/sessions".to_owned(),
                 parent: String::new(),
             };
         }
@@ -33,8 +35,14 @@ impl Endpoints {
             token: format!("{base}/token"),
             login: format!("{base}/login"),
             logout: format!("{base}/logout"),
+            sessions: format!("{base}/sessions"),
             parent: base.to_owned(),
         }
+    }
+
+    /// Path of one session resource, for example `/sessions/<id>`.
+    pub fn session(&self, id: &str) -> String {
+        format!("{}/{}", self.sessions, id)
     }
 
     pub fn cookie_path(&self) -> &str {
@@ -66,6 +74,7 @@ pub struct Config {
     pub serv_buf_size: usize,
     pub session_timeout: u64,
     pub session_buffer_size: usize,
+    pub history_limit: usize,
     pub ipv6: bool,
     pub ssl: bool,
     pub ssl_cert: Option<PathBuf>,
@@ -194,6 +203,8 @@ mod tests {
         assert_eq!(endpoints.token, "/token");
         assert_eq!(endpoints.login, "/login");
         assert_eq!(endpoints.logout, "/logout");
+        assert_eq!(endpoints.sessions, "/sessions");
+        assert_eq!(endpoints.session("abc"), "/sessions/abc");
         assert_eq!(endpoints.cookie_path(), "/");
         assert!(endpoints.parent.is_empty());
     }
@@ -206,6 +217,8 @@ mod tests {
         assert_eq!(endpoints.token, "/mounted/here/token");
         assert_eq!(endpoints.login, "/mounted/here/login");
         assert_eq!(endpoints.logout, "/mounted/here/logout");
+        assert_eq!(endpoints.sessions, "/mounted/here/sessions");
+        assert_eq!(endpoints.session("abc"), "/mounted/here/sessions/abc");
         assert_eq!(endpoints.cookie_path(), "/mounted/here");
         assert_eq!(endpoints.parent, "/mounted/here");
     }
