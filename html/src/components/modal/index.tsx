@@ -1,6 +1,6 @@
 import { h, Component, ComponentChildren } from 'preact';
 
-import './modal.scss';
+import './modal.css';
 
 interface Props {
     show: boolean;

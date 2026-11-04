@@ -10,7 +10,7 @@
   "sortPackageJson": false,
   "overrides": [
     {
-      "files": ["*.{json,jsonc,yml,yaml,scss,css,html}"],
+      "files": ["*.{json,jsonc,yml,yaml,css,html}"],
       "options": {
         "tabWidth": 2
       }

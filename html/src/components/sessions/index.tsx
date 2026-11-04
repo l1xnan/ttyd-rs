@@ -11,7 +11,7 @@ import {
     type SessionsResponse,
 } from './sessions';
 
-import './sessions.scss';
+import './sessions.css';
 
 const POLL_INTERVAL = 5000;
 

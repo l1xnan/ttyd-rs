@@ -1,7 +1,7 @@
 import { bind } from 'decko';
 import { Component, h } from 'preact';
 
-import './login.scss';
+import './login.css';
 
 interface Props {
     loginUrl: string;

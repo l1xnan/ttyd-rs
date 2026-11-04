@@ -224,9 +224,6 @@ importers:
       rollup:
         specifier: ^4.65.1
         version: 4.65.1
-      sass:
-        specifier: ^1.106.1
-        version: 1.106.1
       typescript:
         specifier: ~7.0.2
         version: 7.0.2
@@ -2309,6 +2306,7 @@ snapshots:
   chokidar@5.0.0:
     dependencies:
       readdirp: 5.1.1
+    optional: true
 
   convert-source-map@2.0.0: {}
 
@@ -2394,7 +2392,8 @@ snapshots:
 
   he@1.2.0: {}
 
-  immutable@5.1.9: {}
+  immutable@5.1.9:
+    optional: true
 
   is-extglob@2.1.1:
     optional: true
@@ -2555,7 +2554,8 @@ snapshots:
 
   preact@11.1.0: {}
 
-  readdirp@5.1.1: {}
+  readdirp@5.1.1:
+    optional: true
 
   rolldown@1.2.15:
     dependencies:
@@ -2617,6 +2617,7 @@ snapshots:
       source-map-js: 1.2.2
     optionalDependencies:
       '@parcel/watcher': 2.6.0
+    optional: true
 
   semver@6.3.1: {}
 
