@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
+use lexopt::{Arg, Parser};
 
 use crate::config::{signal_name, signal_number, Config, Endpoints, VERSION};
 
+#[derive(Debug)]
 pub enum Action {
     Help,
     Version,
@@ -63,195 +65,87 @@ fn parse_args_from(
     #[cfg(windows)]
     prefs.insert("isWindows".to_owned(), serde_json::Value::Bool(true));
 
-    let mut i = 0usize;
-    while i < args.len() {
-        let raw = args[i].to_string_lossy().into_owned();
-        if raw == "--" {
-            i += 1;
-            break;
-        }
-        if raw == "-" || !raw.starts_with('-') {
-            break;
-        }
-
-        if let Some(option) = raw.strip_prefix("--") {
-            let (name, inline) = match option.split_once('=') {
-                Some((name, value)) => (name, Some(value.to_owned())),
-                None => (option, None),
-            };
-
-            let mut take_value = |name: &str| -> Result<String> {
-                if let Some(value) = inline.clone() {
-                    return Ok(value);
-                }
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| anyhow!("option '--{name}' requires an argument"))?;
-                Ok(value.to_string_lossy().into_owned())
-            };
-
-            match name {
-                "help" => return Ok(Action::Help),
-                "version" => return Ok(Action::Version),
-                "port" => set_port(&mut port, &take_value(name)?)?,
-                "interface" => interface = Some(take_value(name)?),
-                "socket-owner" => socket_owner = Some(take_value(name)?),
-                "credential" => credential = Some(encode_credential(&take_value(name)?)?),
-                "credential-file" => credential_file = Some(PathBuf::from(take_value(name)?)),
-                "random-credential" => random_credential = true,
-                "auth-header" => auth_header = Some(take_value(name)?.to_ascii_lowercase()),
-                "uid" => uid = Some(parse_u32("uid", &take_value(name)?)?),
-                "gid" => gid = Some(parse_u32("gid", &take_value(name)?)?),
-                "signal" => set_signal(&mut signal, &take_value(name)?)?,
-                "cwd" => cwd = Some(PathBuf::from(take_value(name)?)),
-                "index" => index = Some(parse_index(&take_value(name)?)?),
-                "base-path" => base_path = Some(take_value(name)?),
-                "ping-interval" => {
-                    ping_interval = parse_unsigned("ping-interval", &take_value(name)?)? as u64
-                }
-                "srv-buf-size" => {
-                    serv_buf_size = parse_unsigned("srv-buf-size", &take_value(name)?)?
-                }
-                "session-timeout" => {
-                    session_timeout = parse_unsigned("session-timeout", &take_value(name)?)? as u64
-                }
-                "session-buffer-size" => {
-                    session_buffer_size = parse_unsigned("session-buffer-size", &take_value(name)?)?
-                }
-                "history-limit" => {
-                    history_limit = parse_unsigned("history-limit", &take_value(name)?)?
-                }
-                "ipv6" => ipv6 = true,
-                "ssl" => ssl = true,
-                "ssl-cert" => ssl_cert = Some(PathBuf::from(take_value(name)?)),
-                "ssl-key" => ssl_key = Some(PathBuf::from(take_value(name)?)),
-                "ssl-ca" => ssl_ca = Some(PathBuf::from(take_value(name)?)),
-                "url-arg" => url_arg = true,
-                "writable" => writable = true,
-                "check-origin" => check_origin = true,
-                "max-clients" => max_clients = parse_unsigned("max-clients", &take_value(name)?)?,
-                "once" => once = true,
-                "exit-no-conn" => exit_no_conn = true,
-                "browser" => browser = true,
-                "debug" => debug_level = parse_int("debug", &take_value(name)?)?,
-                "terminal-type" => terminal_type = truncate(&take_value(name)?, 29),
-                "client-option" => add_client_option(&mut prefs, &take_value(name)?)?,
-                _ => bail!("unknown option '--{name}'"),
+    let mut command: Vec<OsString> = Vec::new();
+    let mut parser = Parser::from_args(args);
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Arg::Short('h') | Arg::Long("help") => return Ok(Action::Help),
+            Arg::Short('v') | Arg::Long("version") => return Ok(Action::Version),
+            Arg::Short('p') | Arg::Long("port") => set_port(&mut port, &take_string(&mut parser)?)?,
+            Arg::Short('i') | Arg::Long("interface") => interface = Some(take_string(&mut parser)?),
+            Arg::Short('U') | Arg::Long("socket-owner") => {
+                socket_owner = Some(take_string(&mut parser)?)
             }
-            i += 1;
-            continue;
-        }
-
-        let chars = raw[1..].char_indices();
-        for (offset, flag) in chars {
-            let rest = &raw[1 + offset + flag.len_utf8()..];
-            let mut take_value = |name: &str| -> Result<String> {
-                if !rest.is_empty() {
-                    return Ok(rest.to_owned());
-                }
-                i += 1;
-                let value = args
-                    .get(i)
-                    .ok_or_else(|| anyhow!("option '-{name}' requires an argument"))?;
-                Ok(value.to_string_lossy().into_owned())
-            };
-
-            match flag {
-                'h' => return Ok(Action::Help),
-                'v' => return Ok(Action::Version),
-                'p' => {
-                    set_port(&mut port, &take_value("p")?)?;
-                    break;
-                }
-                'i' => {
-                    interface = Some(take_value("i")?);
-                    break;
-                }
-                'U' => {
-                    socket_owner = Some(take_value("U")?);
-                    break;
-                }
-                'c' => {
-                    credential = Some(encode_credential(&take_value("c")?)?);
-                    break;
-                }
-                'H' => {
-                    auth_header = Some(take_value("H")?.to_ascii_lowercase());
-                    break;
-                }
-                'u' => {
-                    uid = Some(parse_u32("uid", &take_value("u")?)?);
-                    break;
-                }
-                'g' => {
-                    gid = Some(parse_u32("gid", &take_value("g")?)?);
-                    break;
-                }
-                's' => {
-                    set_signal(&mut signal, &take_value("s")?)?;
-                    break;
-                }
-                'w' => {
-                    cwd = Some(PathBuf::from(take_value("w")?));
-                    break;
-                }
-                'I' => {
-                    index = Some(parse_index(&take_value("I")?)?);
-                    break;
-                }
-                'b' => {
-                    base_path = Some(take_value("b")?);
-                    break;
-                }
-                'P' => {
-                    ping_interval = parse_unsigned("ping-interval", &take_value("P")?)? as u64;
-                    break;
-                }
-                'f' => {
-                    serv_buf_size = parse_unsigned("srv-buf-size", &take_value("f")?)?;
-                    break;
-                }
-                '6' => ipv6 = true,
-                'S' => ssl = true,
-                'C' => {
-                    ssl_cert = Some(PathBuf::from(take_value("C")?));
-                    break;
-                }
-                'K' => {
-                    ssl_key = Some(PathBuf::from(take_value("K")?));
-                    break;
-                }
-                'A' => {
-                    ssl_ca = Some(PathBuf::from(take_value("A")?));
-                    break;
-                }
-                'a' => url_arg = true,
-                'W' => writable = true,
-                'O' => check_origin = true,
-                'm' => {
-                    max_clients = parse_unsigned("max-clients", &take_value("m")?)?;
-                    break;
-                }
-                'o' => once = true,
-                'q' => exit_no_conn = true,
-                'B' => browser = true,
-                'd' => {
-                    debug_level = parse_int("debug", &take_value("d")?)?;
-                    break;
-                }
-                'T' => {
-                    terminal_type = truncate(&take_value("T")?, 29);
-                    break;
-                }
-                't' => {
-                    add_client_option(&mut prefs, &take_value("t")?)?;
-                    break;
-                }
-                _ => bail!("unknown option '-{flag}'"),
+            Arg::Short('c') | Arg::Long("credential") => {
+                credential = Some(encode_credential(&take_string(&mut parser)?)?)
             }
+            Arg::Long("credential-file") => credential_file = Some(take_path(&mut parser)?),
+            Arg::Long("random-credential") => random_credential = true,
+            Arg::Short('H') | Arg::Long("auth-header") => {
+                auth_header = Some(take_string(&mut parser)?.to_ascii_lowercase())
+            }
+            Arg::Short('u') | Arg::Long("uid") => {
+                uid = Some(parse_u32("uid", &take_string(&mut parser)?)?)
+            }
+            Arg::Short('g') | Arg::Long("gid") => {
+                gid = Some(parse_u32("gid", &take_string(&mut parser)?)?)
+            }
+            Arg::Short('s') | Arg::Long("signal") => {
+                set_signal(&mut signal, &take_string(&mut parser)?)?
+            }
+            Arg::Short('w') | Arg::Long("cwd") => cwd = Some(take_path(&mut parser)?),
+            Arg::Short('I') | Arg::Long("index") => {
+                index = Some(parse_index(&take_string(&mut parser)?)?)
+            }
+            Arg::Short('b') | Arg::Long("base-path") => base_path = Some(take_string(&mut parser)?),
+            Arg::Short('P') | Arg::Long("ping-interval") => {
+                ping_interval = parse_unsigned("ping-interval", &take_string(&mut parser)?)? as u64
+            }
+            Arg::Short('f') | Arg::Long("srv-buf-size") => {
+                serv_buf_size = parse_unsigned("srv-buf-size", &take_string(&mut parser)?)?
+            }
+            Arg::Long("session-timeout") => {
+                session_timeout =
+                    parse_unsigned("session-timeout", &take_string(&mut parser)?)? as u64
+            }
+            Arg::Long("session-buffer-size") => {
+                session_buffer_size =
+                    parse_unsigned("session-buffer-size", &take_string(&mut parser)?)?
+            }
+            Arg::Long("history-limit") => {
+                history_limit = parse_unsigned("history-limit", &take_string(&mut parser)?)?
+            }
+            Arg::Short('6') | Arg::Long("ipv6") => ipv6 = true,
+            Arg::Short('S') | Arg::Long("ssl") => ssl = true,
+            Arg::Short('C') | Arg::Long("ssl-cert") => ssl_cert = Some(take_path(&mut parser)?),
+            Arg::Short('K') | Arg::Long("ssl-key") => ssl_key = Some(take_path(&mut parser)?),
+            Arg::Short('A') | Arg::Long("ssl-ca") => ssl_ca = Some(take_path(&mut parser)?),
+            Arg::Short('a') | Arg::Long("url-arg") => url_arg = true,
+            Arg::Short('W') | Arg::Long("writable") => writable = true,
+            Arg::Short('O') | Arg::Long("check-origin") => check_origin = true,
+            Arg::Short('m') | Arg::Long("max-clients") => {
+                max_clients = parse_unsigned("max-clients", &take_string(&mut parser)?)?
+            }
+            Arg::Short('o') | Arg::Long("once") => once = true,
+            Arg::Short('q') | Arg::Long("exit-no-conn") => exit_no_conn = true,
+            Arg::Short('B') | Arg::Long("browser") => browser = true,
+            Arg::Short('d') | Arg::Long("debug") => {
+                debug_level = parse_int("debug", &take_string(&mut parser)?)?
+            }
+            Arg::Short('T') | Arg::Long("terminal-type") => {
+                terminal_type = truncate(&take_string(&mut parser)?, 29)
+            }
+            Arg::Short('t') | Arg::Long("client-option") => {
+                add_client_option(&mut prefs, &take_string(&mut parser)?)?
+            }
+            Arg::Value(value) => {
+                command.push(value);
+                command.extend(parser.raw_args()?);
+                break;
+            }
+            Arg::Short(flag) => bail!("unknown option '-{flag}'"),
+            Arg::Long(name) => bail!("unknown option '--{name}'"),
         }
-        i += 1;
     }
 
     if let Some(path) = &base_path {
@@ -264,7 +158,6 @@ fn parse_args_from(
         }
     }
 
-    let command = args[i..].to_vec();
     if command.is_empty() {
         bail!("missing start command");
     }
@@ -358,6 +251,14 @@ fn parse_args_from(
         command,
         command_string,
     })))
+}
+
+fn take_string(parser: &mut Parser) -> Result<String> {
+    Ok(parser.value()?.to_string_lossy().into_owned())
+}
+
+fn take_path(parser: &mut Parser) -> Result<PathBuf> {
+    Ok(PathBuf::from(parser.value()?))
 }
 
 fn set_port(port: &mut u16, value: &str) -> Result<()> {
@@ -953,6 +854,120 @@ mod tests {
             config.credential.as_deref(),
             Some(encode_credential(&announcement).unwrap().as_str())
         );
+    }
+
+    fn run_config(args: impl IntoIterator<Item = impl Into<OsString>>) -> Config {
+        let Action::Run(config) = parse_args_from(args, None).unwrap() else {
+            panic!("expected a running configuration");
+        };
+        *config
+    }
+
+    #[test]
+    fn keeps_flags_after_the_command_in_the_command() {
+        let config = run_config(["bash", "-x"]);
+        assert_eq!(
+            config.command,
+            [OsString::from("bash"), OsString::from("-x")]
+        );
+        assert_eq!(config.command_string, "bash -x");
+
+        let config = run_config(["-p", "8080", "bash", "-x"]);
+        assert_eq!(config.port, 8080);
+        assert_eq!(
+            config.command,
+            [OsString::from("bash"), OsString::from("-x")]
+        );
+
+        let config = run_config(["bash", "--help"]);
+        assert_eq!(
+            config.command,
+            [OsString::from("bash"), OsString::from("--help")]
+        );
+    }
+
+    #[test]
+    fn terminates_options_and_keeps_special_command_names() {
+        let config = run_config(["--", "-x"]);
+        assert_eq!(config.command, [OsString::from("-x")]);
+
+        let config = run_config(["-"]);
+        assert_eq!(config.command, [OsString::from("-")]);
+    }
+
+    #[test]
+    fn parses_clustered_and_attached_short_options() {
+        let config = run_config(["-Wp9000", "bash"]);
+        assert!(config.writable);
+        assert_eq!(config.port, 9000);
+
+        let config = run_config(["-p9000", "bash"]);
+        assert_eq!(config.port, 9000);
+
+        let config = run_config(["-6W", "bash"]);
+        assert!(config.ipv6);
+        assert!(config.writable);
+    }
+
+    #[test]
+    fn accepts_inline_long_option_values() {
+        let config = run_config(["--port=9000", "bash"]);
+        assert_eq!(config.port, 9000);
+
+        let config = run_config(["--client-option=fontSize=16", "bash"]);
+        let prefs: serde_json::Value = serde_json::from_str(&config.prefs_json).unwrap();
+        assert_eq!(prefs["fontSize"], 16);
+    }
+
+    #[test]
+    fn later_options_override_earlier_ones() {
+        let config = run_config(["-p", "1", "-p", "2", "bash"]);
+        assert_eq!(config.port, 2);
+
+        let config = run_config(["-W", "-W", "bash"]);
+        assert!(config.writable);
+    }
+
+    #[test]
+    fn parses_negative_and_radix_debug_levels() {
+        let config = run_config(["-d", "-1", "bash"]);
+        assert_eq!(config.debug_level, -1);
+
+        let config = run_config(["-d0x10", "bash"]);
+        assert_eq!(config.debug_level, 16);
+    }
+
+    #[test]
+    fn recognizes_help_and_version_in_both_forms() {
+        for args in [vec!["-h"], vec!["--help"]] {
+            assert!(matches!(parse_args_from(args, None).unwrap(), Action::Help));
+        }
+        for args in [vec!["-v"], vec!["--version"]] {
+            assert!(matches!(
+                parse_args_from(args, None).unwrap(),
+                Action::Version
+            ));
+        }
+        assert!(matches!(
+            parse_args_from(["-v", "bash"], None).unwrap(),
+            Action::Version
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_commands_and_unknown_options() {
+        let error = parse_args_from(["-W"], None).unwrap_err().to_string();
+        assert!(error.contains("missing start command"), "{error}");
+
+        let error = parse_args_from(["--bogus", "bash"], None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown option '--bogus'"), "{error}");
+
+        let error = parse_args_from(["-Z", "bash"], None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown option '-Z'"), "{error}");
     }
 
     fn credential_temp_path(name: &str) -> PathBuf {
