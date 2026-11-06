@@ -15,14 +15,32 @@ import './sessions.css';
 
 const POLL_INTERVAL = 5000;
 
+export type DeletedSessionKind = 'live' | 'history';
+
 export interface SessionPanelProps {
     sessionsUrl: string;
-    currentSessionId?: string;
+    /**
+     * @deprecated The workspace no longer hides sessions that are already open;
+     * several tabs may observe the same PTY. Kept for standalone use/tests.
+     */
+    currentSessionId?: string | readonly string[];
+    /** @deprecated Single id compatibility; merged into `viewingHistoryIds`. */
     viewingHistoryId?: string;
+    /** Every history id currently replayed by a tab on this page. */
+    viewingHistoryIds?: readonly string[];
+    /** Session/history ids already open in a tab; clicking them switches tabs. */
+    openIds?: readonly string[];
     onAuthRequired?: () => void;
+    /** Switches to an existing tab when possible, otherwise opens a new one. */
     onAttach?: (session: SessionSummary) => void;
     onReplay?: (session: SessionSummary) => void;
-    onNewSession?: () => void;
+    /** Modifier-click forces a duplicate tab instead of switching. */
+    onAttachInNewTab?: (session: SessionSummary) => void;
+    onReplayInNewTab?: (session: SessionSummary) => void;
+    /** Opens a fresh terminal tab; same action as the tab bar's `+` button. */
+    onNewTab?: () => void;
+    /** Fired after a successful DELETE so the workspace can close related tabs. */
+    onDelete?: (id: string, kind: DeletedSessionKind) => void;
 }
 
 interface State {
@@ -142,30 +160,34 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
     }
 
     @bind
-    private handleAttach(session: SessionSummary) {
+    private handleAttach(event: MouseEvent, session: SessionSummary) {
         this.close();
-        this.props.onAttach?.(session);
+        const forceNew = event.ctrlKey || event.metaKey || event.shiftKey;
+        const handler = (forceNew ? this.props.onAttachInNewTab : undefined) ?? this.props.onAttach;
+        handler?.(session);
     }
 
     @bind
-    private handleReplay(session: SessionSummary) {
+    private handleReplay(event: MouseEvent, session: SessionSummary) {
         this.close();
-        this.props.onReplay?.(session);
+        const forceNew = event.ctrlKey || event.metaKey || event.shiftKey;
+        const handler = (forceNew ? this.props.onReplayInNewTab : undefined) ?? this.props.onReplay;
+        handler?.(session);
     }
 
     @bind
-    private handleNewSession() {
+    private handleNewTab() {
         this.close();
-        this.props.onNewSession?.();
+        this.props.onNewTab?.();
     }
 
     @bind
-    private handleDelete(event: Event, id: string) {
+    private handleDelete(event: Event, id: string, kind: DeletedSessionKind) {
         event.stopPropagation();
-        void this.deleteSession(id);
+        void this.deleteSession(id, kind);
     }
 
-    private async deleteSession(id: string) {
+    private async deleteSession(id: string, kind: DeletedSessionKind) {
         if (this.state.deleting) return;
         this.setState({ deleting: id, error: '' });
 
@@ -186,6 +208,9 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                         history: data.history.filter(session => session.id !== id),
                     },
                 }));
+                // Report before the silent refresh: the workspace closes its
+                // tabs from its own authoritative state, not from this snapshot.
+                this.props.onDelete?.(id, kind);
                 void this.load(true);
                 return;
             }
@@ -210,6 +235,11 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
         const running = runningSessions(data, this.props.currentSessionId);
         const history = data?.history ?? [];
         const empty = running.length === 0 && history.length === 0;
+        const viewing = new Set(this.props.viewingHistoryIds ?? []);
+        if (this.props.viewingHistoryId) viewing.add(this.props.viewingHistoryId);
+        const openIdSet = new Set(this.props.openIds ?? []);
+        const hint = (id: string) =>
+            openIdSet.has(id) ? 'Switch to the open tab · Ctrl/⌘/Shift-click to open another tab' : 'Open in a new tab';
 
         return (
             <div class="session-panel">
@@ -228,8 +258,8 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                         <header class="session-header">
                             <h2 class="session-title">Sessions</h2>
                             <div class="session-actions">
-                                <button class="session-new" type="button" onClick={this.handleNewSession}>
-                                    New session
+                                <button class="session-new" type="button" onClick={this.handleNewTab}>
+                                    New tab
                                 </button>
                                 <button
                                     class="session-close"
@@ -260,7 +290,8 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                                                 <button
                                                     class="session-row"
                                                     type="button"
-                                                    onClick={() => this.handleAttach(session)}
+                                                    title={hint(session.id)}
+                                                    onClick={event => this.handleAttach(event, session)}
                                                 >
                                                     <span class="session-row-main">{session.command}</span>
                                                     <span class="session-row-meta">
@@ -272,6 +303,16 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                                                             {session.attached ?? 0} attached
                                                         </span>
                                                     </span>
+                                                </button>
+                                                <button
+                                                    class="session-end"
+                                                    type="button"
+                                                    aria-label={`End and archive ${session.command}`}
+                                                    title="End and archive"
+                                                    disabled={deleting === session.id}
+                                                    onClick={event => this.handleDelete(event, session.id, 'live')}
+                                                >
+                                                    ×
                                                 </button>
                                             </li>
                                         ))}
@@ -287,12 +328,11 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                                             <li class="session-item" key={session.id}>
                                                 <button
                                                     class={`session-row${
-                                                        session.id === this.props.viewingHistoryId
-                                                            ? ' session-row--active'
-                                                            : ''
+                                                        viewing.has(session.id) ? ' session-row--active' : ''
                                                     }`}
                                                     type="button"
-                                                    onClick={() => this.handleReplay(session)}
+                                                    title={hint(session.id)}
+                                                    onClick={event => this.handleReplay(event, session)}
                                                 >
                                                     <span class="session-row-main">{session.command}</span>
                                                     <span class="session-row-meta">
@@ -309,7 +349,7 @@ export class SessionPanel extends Component<SessionPanelProps, State> {
                                                     type="button"
                                                     aria-label={`Delete ${session.command}`}
                                                     disabled={deleting === session.id}
-                                                    onClick={event => this.handleDelete(event, session.id)}
+                                                    onClick={event => this.handleDelete(event, session.id, 'history')}
                                                 >
                                                     ×
                                                 </button>

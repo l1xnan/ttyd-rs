@@ -74,6 +74,14 @@ describe('runningSessions', () => {
         expect(runningSessions(data, undefined).map(session => session.id)).toEqual(['live-1', 'live-2']);
         expect(runningSessions(undefined, 'live-1')).toEqual([]);
     });
+
+    it('excludes every session attached by a page tab', () => {
+        const data = parseSessionsResponse(payload) as SessionsResponse;
+
+        expect(runningSessions(data, ['live-1', 'live-2'])).toEqual([]);
+        expect(runningSessions(data, [])).toHaveLength(2);
+        expect(runningSessions(data, ['live-1']).map(session => session.id)).toEqual(['live-2']);
+    });
 });
 
 describe('session formatting', () => {

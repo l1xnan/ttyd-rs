@@ -277,7 +277,8 @@
   color: var(--session-muted);
 }
 
-.session-delete {
+.session-delete,
+.session-end {
   width: 30px;
   padding: 0;
   border: 0;
@@ -297,22 +298,28 @@
 }
 
 .session-item:hover .session-delete,
-.session-delete:focus-visible {
+.session-item:hover .session-end,
+.session-delete:focus-visible,
+.session-end:focus-visible {
   opacity: 1;
 }
 
 @media (hover: none) {
-  .session-delete {
+  .session-delete,
+  .session-end {
     opacity: 1;
   }
 }
 
 .session-delete:hover,
-.session-delete:focus-visible {
+.session-delete:focus-visible,
+.session-end:hover,
+.session-end:focus-visible {
   color: var(--session-danger);
 }
 
-.session-delete:disabled {
+.session-delete:disabled,
+.session-end:disabled {
   cursor: wait;
   opacity: 0.5;
 }
@@ -352,7 +359,8 @@
 
   .session-toggle,
   .session-new,
-  .session-delete {
+  .session-delete,
+  .session-end {
     transition: none;
   }
 }

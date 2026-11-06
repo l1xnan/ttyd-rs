@@ -10,7 +10,13 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
 import { ZmodemAddon } from './addons/zmodem';
 import { buildHandshake, parseReadonlyFrame } from './handshake';
-import { activePreferenceEntries, parseQueryOptions, type ClientOptions, type RendererType } from './prefs';
+import {
+    activePreferenceEntries,
+    parseQueryOptions,
+    resolveSessionTimeout,
+    type ClientOptions,
+    type RendererType,
+} from './prefs';
 import { sixelPrimaryDeviceAttributes } from './sixel';
 
 import '@xterm/xterm/css/xterm.css';
@@ -58,12 +64,21 @@ export interface XtermOptions {
     clientOptions: ClientOptions;
     termOptions: ITerminalOptions;
     sessionTimeout: number;
+    /** Live session id owned by the workspace; only read once at construction. */
+    initialSessionId?: string;
+    /** Whether this terminal is the visible tab at construction time. */
+    active?: boolean;
     onAuthRequired?: () => void;
-    onSessionChange?: (id: string | undefined) => void;
     onHistoryChange?: (id: string | undefined) => void;
+    /** Authoritative persistence signal for the live PTY session id. */
+    onLiveSessionIdChange?: (id: string | undefined) => void;
+    /** Shell (OSC) title, used to label the tab. */
+    onTitleChange?: (title: string | undefined) => void;
+    onLeaveAlertDisabled?: () => void;
+    onRequestClose?: () => void;
+    onConnectionFailed?: (message: string) => void;
 }
 
-const SESSION_STORAGE_KEY = `ttyd.session:${window.location.pathname.replace(/[/]+$/, '') || '/'}`;
 const DEFAULT_TITLE = 'ttyd - Terminal';
 
 function toDisposable(f: () => void): IDisposable {
@@ -102,6 +117,9 @@ export class Xterm {
     private doReconnect = true;
     private closeOnDisconnect = false;
     private sessionId?: string;
+    private active = false;
+    private desiredTitle = DEFAULT_TITLE;
+    private closed = false;
 
     /// Read-only history replay state. `attachOnly` selects the replay
     /// handshake; `requestedSession` is the history id, never the live id.
@@ -117,9 +135,16 @@ export class Xterm {
     constructor(
         private options: XtermOptions,
         private sendCb: () => void
-    ) {}
+    ) {
+        this.sessionId = options.initialSessionId;
+        this.active = options.active === true;
+    }
 
-    dispose() {
+    /**
+     * Clear listeners and transient addons between socket connections. This is
+     * intentionally not a full teardown: reconnecting keeps the xterm instance.
+     */
+    private reset() {
         for (const d of this.disposables) {
             d.dispose();
         }
@@ -135,7 +160,70 @@ export class Xterm {
         this.reconnect = false;
         this.doReconnect = false;
         this.teardownSocket();
-        this.dispose();
+        this.reset();
+    }
+
+    /** Full teardown, only used when the tab itself is removed. */
+    @bind
+    public dispose() {
+        if (this.closed) return;
+        this.closed = true;
+        this.close();
+        if (this.active && (window as unknown as { term?: TtydTerminal }).term === this.terminal) {
+            delete (window as unknown as { term?: TtydTerminal }).term;
+        }
+        try {
+            this.terminal?.dispose();
+        } catch {
+            // A terminal that was never opened has nothing to dispose.
+        }
+    }
+
+    /** Only the active tab owns the global terminal handle. */
+    @bind
+    public setActive(active: boolean) {
+        if (this.active === active) return;
+        this.active = active;
+        if (!active) return;
+
+        // `open()` assigns the global handle for the initially active tab; a
+        // tab activated before its token fetch finishes has no terminal yet.
+        if (this.terminal) {
+            window.term = this.terminal as TtydTerminal;
+            window.term.fit = () => this.fit();
+        }
+        document.title = this.desiredTitle;
+        this.fit();
+        this.focus();
+    }
+
+    @bind
+    public fit() {
+        if (!this.active || !this.terminal?.element) return;
+        this.fitAddon.fit();
+    }
+
+    @bind
+    public focus() {
+        if (this.active) this.terminal?.focus();
+    }
+
+    /** A live, writable PTY connection (history replays do not count). */
+    public hasLiveSession(): boolean {
+        return !this.readOnly && !this.attachOnly && this.socket?.readyState === WebSocket.OPEN;
+    }
+
+    /** The one place allowed to write document.title; hidden tabs only cache it. */
+    private setDocumentTitle(text: string) {
+        this.desiredTitle = text;
+        if (this.active) document.title = text;
+    }
+
+    /** Authoritative live session id change, forwarded to the workspace. */
+    private setLive(id: string | undefined) {
+        if (id !== undefined && (id === '' || id.length > 128)) return;
+        this.sessionId = id;
+        this.options.onLiveSessionIdChange?.(id);
     }
 
     /**
@@ -162,7 +250,7 @@ export class Xterm {
 
         const { terminal } = this;
         this.teardownSocket();
-        this.dispose();
+        this.reset();
         this.attachOnly = false;
         this.readOnly = false;
         this.requestedSession = undefined;
@@ -171,34 +259,48 @@ export class Xterm {
         this.connectNotice = 'Attached';
         terminal.options.disableStdin = false;
         this.clearShellTitle();
-        this.rememberSession(id);
+        this.setLive(id);
         this.options.onHistoryChange?.(undefined);
-        this.options.onSessionChange?.(this.sessionId);
         this.connect();
     }
 
-    /// Show a read-only replay of an ended session.
+    /**
+     * Configure a read-only replay without touching the socket or the tab
+     * label. `clearShellTitle` is deliberately not called here: it would emit
+     * `onTitleChange(undefined)` and wipe the replay tab's history label.
+     */
+    private enterReplayMode(id: string, command: string) {
+        this.attachOnly = true;
+        this.readOnly = true;
+        this.requestedSession = id;
+        this.historyCommand = command !== '' ? command : id;
+        this.exitCode = undefined;
+        this.connectNotice = undefined;
+        // A replay id must never become the live session. Only the in-memory
+        // id is cleared; the workspace keeps the persisted live session id.
+        this.sessionId = undefined;
+        this.terminal.options.disableStdin = true;
+        this.setDocumentTitle(`${this.historyCommand} (ended)`);
+    }
+
+    /** Start a replay tab right after open(), before any socket exists. */
+    @bind
+    public startReplay(id: string, command: string) {
+        if (!id || !this.terminal) return;
+        this.enterReplayMode(id, command);
+        this.connect();
+    }
+
+    /// Show a read-only replay of an ended session (legacy in-place path).
     @bind
     public replayHistory(id: string, command: string) {
         if (!id || !this.terminal) return;
 
-        const { terminal } = this;
         this.teardownSocket();
-        this.dispose();
-        this.attachOnly = true;
-        this.readOnly = true;
-        this.requestedSession = id;
-        this.historyCommand = command !== undefined && command !== '' ? command : id;
-        this.exitCode = undefined;
-        this.connectNotice = undefined;
-        // A history id must never become the live session, so keep it out of
-        // sessionStorage and clear the in-memory live id only.
-        this.sessionId = undefined;
-        terminal.options.disableStdin = true;
-        terminal.reset();
+        this.reset();
+        this.enterReplayMode(id, command);
+        this.terminal.reset();
         this.clearShellTitle();
-        document.title = `${this.historyCommand} (ended)`;
-        this.options.onSessionChange?.(undefined);
         this.options.onHistoryChange?.(id);
         this.connect();
     }
@@ -210,7 +312,7 @@ export class Xterm {
 
         const { terminal } = this;
         this.teardownSocket();
-        this.dispose();
+        this.reset();
         this.attachOnly = false;
         this.readOnly = false;
         this.requestedSession = undefined;
@@ -219,15 +321,15 @@ export class Xterm {
         this.connectNotice = 'New session';
         terminal.options.disableStdin = false;
         this.clearShellTitle();
-        this.forgetSession();
-        this.options.onSessionChange?.(undefined);
+        this.setLive(undefined);
         this.options.onHistoryChange?.(undefined);
         this.connect();
     }
 
     private clearShellTitle() {
         this.title = undefined;
-        document.title = this.titleFixed ?? DEFAULT_TITLE;
+        this.setDocumentTitle(this.titleFixed ?? DEFAULT_TITLE);
+        this.options.onTitleChange?.(undefined);
     }
 
     @bind
@@ -271,75 +373,19 @@ export class Xterm {
         }
     }
 
-    @bind
-    private onWindowUnload(event: BeforeUnloadEvent) {
-        // A read-only history view has no PTY to terminate.
-        if (this.readOnly) return undefined;
-        if (this.socket?.readyState !== WebSocket.OPEN) return undefined;
-        // With session persistence enabled, refreshing or reopening this tab
-        // restores the same PTY, so there is nothing to warn about.
-        if (this.sessionTimeout() > 0) return undefined;
-
-        event.preventDefault();
-        const message = 'Close terminal? this will also terminate the command.';
-        event.returnValue = message;
-        return message;
-    }
-
-    private storedSession(): string | undefined {
-        try {
-            const id = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
-            if (id && id.length > 0 && id.length <= 128) return id;
-        } catch {
-            // sessionStorage can be unavailable in private or restricted contexts.
-        }
-        return undefined;
-    }
-
-    private rememberSession(id: string) {
-        if (!id || id.length > 128) return;
-        this.sessionId = id;
-        try {
-            window.sessionStorage.setItem(SESSION_STORAGE_KEY, id);
-        } catch {
-            // Keep the in-memory id so reconnects within this page still work.
-        }
-    }
-
-    private forgetSession() {
-        this.sessionId = undefined;
-        try {
-            window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-        } catch {
-            // Ignore unavailable storage.
-        }
-    }
-
-    /// Resolve the timeout sent to the server. The server value is the
-    /// default; `?sessionTimeout=N` overrides it for this tab.
+    /// Resolve the timeout sent to the server for this page.
     private sessionTimeout(): number {
-        let timeout = this.options.sessionTimeout;
-        if (!Number.isFinite(timeout) || timeout < 0) {
-            timeout = 0;
-        }
-        const override = new URLSearchParams(window.location.search).get('sessionTimeout');
-        if (override !== null) {
-            const parsed = Number.parseInt(override, 10);
-            if (Number.isFinite(parsed) && parsed >= 0) {
-                timeout = parsed;
-            }
-        }
-        return Math.min(Math.trunc(timeout), 3600);
+        return resolveSessionTimeout(this.options.sessionTimeout, window.location.search);
     }
 
     @bind
     public open(parent: HTMLElement) {
         this.terminal = new Terminal(this.options.termOptions);
         const { terminal, fitAddon, overlayAddon, clipboardAddon, webLinksAddon } = this;
-        window.term = terminal as TtydTerminal;
-        window.term.fit = () => {
-            this.fitAddon.fit();
-        };
+        if (this.active) {
+            window.term = terminal as TtydTerminal;
+            window.term.fit = () => this.fit();
+        }
 
         terminal.loadAddon(fitAddon);
         terminal.loadAddon(overlayAddon);
@@ -347,18 +393,20 @@ export class Xterm {
         terminal.loadAddon(webLinksAddon);
 
         terminal.open(parent);
-        fitAddon.fit();
+        // Hidden panes keep their layout but must not be fitted (0 columns).
+        this.fit();
     }
 
     @bind
     private initListeners() {
-        const { terminal, fitAddon, overlayAddon, register, sendData } = this;
+        const { terminal, overlayAddon, register, sendData } = this;
         register(
             terminal.onTitleChange(data => {
                 // The ended-history title is set from the replay frame instead.
                 if (this.readOnly) return;
                 if (data && data !== '' && !this.titleFixed) {
-                    document.title = data + ' | ' + this.title;
+                    this.setDocumentTitle(data + ' | ' + (this.title ?? DEFAULT_TITLE));
+                    this.options.onTitleChange?.(data);
                 }
             })
         );
@@ -385,6 +433,7 @@ export class Xterm {
         );
         register(
             terminal.onSelectionChange(() => {
+                if (!this.active) return;
                 if (this.terminal.getSelection() === '') return;
                 try {
                     document.execCommand('copy');
@@ -394,8 +443,8 @@ export class Xterm {
                 this.overlayAddon?.showOverlay('\u2702', 200);
             })
         );
-        register(addEventListener(window, 'resize', () => fitAddon.fit()));
-        register(addEventListener(window, 'beforeunload', this.onWindowUnload));
+        // Window-level resize / beforeunload listeners live in the workspace so
+        // they are registered once instead of once per tab.
     }
 
     @bind
@@ -445,6 +494,7 @@ export class Xterm {
 
     @bind
     public connect() {
+        if (this.closed) return;
         this.teardownSocket();
         this.socket = new WebSocket(this.options.wsUrl, ['tty']);
         const { socket, register } = this;
@@ -461,10 +511,9 @@ export class Xterm {
         console.log('[ttyd] websocket connection opened');
 
         const { textEncoder, terminal, overlayAddon } = this;
-        const session = this.attachOnly ? this.requestedSession : (this.sessionId ?? this.storedSession());
-        if (!this.attachOnly && session) {
-            this.sessionId = session;
-        }
+        // The workspace owns the persisted session id; Xterm only keeps the
+        // in-memory one. History replays use their own read-only id.
+        const session = this.attachOnly ? this.requestedSession : this.sessionId;
         const msg = buildHandshake({
             token: this.token,
             columns: terminal.cols,
@@ -480,7 +529,6 @@ export class Xterm {
             terminal.reset();
             terminal.options.disableStdin = true;
             overlayAddon.showOverlay('Read-only history');
-            this.options.onSessionChange?.(undefined);
         } else {
             this.readOnly = false;
             terminal.reset();
@@ -496,7 +544,7 @@ export class Xterm {
 
         this.doReconnect = this.reconnect;
         this.initListeners();
-        terminal.focus();
+        this.focus();
     }
 
     @bind
@@ -506,10 +554,10 @@ export class Xterm {
         const wasHistory = this.readOnly || this.attachOnly;
         const { refreshToken, connect, doReconnect, overlayAddon } = this;
         overlayAddon.showOverlay('Connection Closed');
-        this.dispose();
+        this.reset();
 
         // A history replay is a read-only snapshot: never reconnect and never
-        // offer "Press Enter". This is handled before the 1008 forgetSession
+        // offer "Press Enter". This is handled before the 1008 session clearing
         // below, so a forbidden replay keeps the stored live session.
         if (wasHistory) {
             if (this.exitCode !== undefined) {
@@ -524,31 +572,43 @@ export class Xterm {
 
         // 1008: CLOSE_POLICY. The stored session cannot be used by this user.
         if (event.code === 1008) {
-            this.forgetSession();
-            this.options.onSessionChange?.(undefined);
+            this.setLive(undefined);
         }
 
+        // A socket that never opened was refused during the HTTP upgrade, for
+        // example -o / -m returning 403. Do not spin on reconnects and do not
+        // close the tab; leave a manual retry available.
+        const refused = !this.opened;
+        if (refused) {
+            overlayAddon.showOverlay('Connection refused · server limit or offline');
+            this.options.onConnectionFailed?.('Connection refused');
+            this.focus();
+        }
+
+        const { terminal, register } = this;
         // 1000: CLOSE_NORMAL
-        if (event.code !== 1000 && doReconnect) {
+        if (!refused && event.code !== 1000 && doReconnect) {
             overlayAddon.showOverlay('Reconnecting...');
             refreshToken().then(ok => {
-                if (ok) connect();
+                if (ok && !this.closed) connect();
             });
-        } else if (this.closeOnDisconnect) {
-            window.close();
+        } else if (!refused && this.closeOnDisconnect) {
+            // Closing the whole browser tab would discard every other tab.
+            this.options.onRequestClose?.();
         } else {
-            const { terminal } = this;
-            const keyDispose = terminal.onKey(e => {
-                const event = e.domEvent;
-                if (event.key === 'Enter') {
-                    keyDispose.dispose();
-                    overlayAddon.showOverlay('Reconnecting...');
-                    refreshToken().then(ok => {
-                        if (ok) connect();
-                    });
-                }
-            });
-            overlayAddon.showOverlay('Press ⏎ to Reconnect');
+            const keyDispose = register(
+                terminal.onKey(e => {
+                    const event = e.domEvent;
+                    if (event.key === 'Enter') {
+                        keyDispose.dispose();
+                        overlayAddon.showOverlay('Reconnecting...');
+                        refreshToken().then(ok => {
+                            if (ok && !this.closed) connect();
+                        });
+                    }
+                })
+            );
+            overlayAddon.showOverlay(refused ? 'Press ⏎ to Retry' : 'Press ⏎ to Reconnect');
         }
     }
 
@@ -585,7 +645,7 @@ export class Xterm {
                 break;
             case Command.SET_WINDOW_TITLE:
                 this.title = textDecoder.decode(data);
-                document.title = this.title;
+                this.setDocumentTitle(this.title);
                 break;
             case Command.SET_PREFERENCES:
                 this.applyPreferences({
@@ -596,10 +656,9 @@ export class Xterm {
                 break;
             case Command.SET_SESSION:
                 // A replay connection never creates a PTY, so its id is not a
-                // live session and must not be remembered.
+                // live session and must not be persisted.
                 if (this.attachOnly) break;
-                this.rememberSession(textDecoder.decode(data));
-                this.options.onSessionChange?.(this.sessionId);
+                this.setLive(textDecoder.decode(data));
                 break;
             case Command.READONLY:
                 this.handleReadonlyFrame(new Uint8Array(data));
@@ -623,14 +682,14 @@ export class Xterm {
         this.exitCode = frame.exitCode;
         terminal.options.disableStdin = true;
         const command = this.historyCommand ?? 'History';
-        document.title = `${command} (ended)`;
+        this.setDocumentTitle(`${command} (ended)`);
         const code = frame.exitCode < 0 ? 'unknown' : String(frame.exitCode);
         overlayAddon.showOverlay(`Read-only · exit ${code}`);
     }
 
     @bind
     private applyPreferences(prefs: Preferences) {
-        const { terminal, fitAddon, register } = this;
+        const { terminal, register } = this;
         if ((prefs.enableZmodem || prefs.enableTrzsz) && !this.zmodemAddon) {
             this.zmodemAddon = new ZmodemAddon({
                 zmodem: prefs.enableZmodem,
@@ -652,7 +711,8 @@ export class Xterm {
                     break;
                 case 'disableLeaveAlert':
                     if (value) {
-                        window.removeEventListener('beforeunload', this.onWindowUnload);
+                        // The workspace owns the single beforeunload listener.
+                        this.options.onLeaveAlertDisabled?.();
                         console.log('[ttyd] Leave site alert disabled');
                     }
                     break;
@@ -696,7 +756,7 @@ export class Xterm {
                     if (!value || value === '') break;
                     console.log(`[ttyd] setting fixed title: ${value}`);
                     this.titleFixed = value;
-                    document.title = value;
+                    this.setDocumentTitle(value);
                     break;
                 case 'isWindows':
                     if (value) console.log('[ttyd] is windows');
@@ -723,7 +783,7 @@ export class Xterm {
                     } else {
                         terminal.options[key] = value;
                     }
-                    if (key.indexOf('font') === 0) fitAddon.fit();
+                    if (key.indexOf('font') === 0) this.fit();
                     break;
             }
         }

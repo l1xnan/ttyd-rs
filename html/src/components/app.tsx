@@ -1,8 +1,8 @@
 import { bind } from 'decko';
-import { Component, Fragment, h } from 'preact';
+import { Component, h } from 'preact';
 
 import { Login } from './login';
-import { Terminal } from './terminal';
+import { Workspace } from './workspace';
 
 import type { ITerminalOptions, ITheme } from '@xterm/xterm';
 import { DEFAULT_CLIENT_OPTIONS, type ClientOptions, type FlowControl } from './terminal/xterm';
@@ -194,29 +194,20 @@ export class App extends Component<{}, State> {
         }
 
         return (
-            <Fragment>
-                <Terminal
-                    id="terminal-container"
-                    wsUrl={wsUrl}
-                    tokenUrl={tokenUrl}
-                    sessionsUrl={sessionsUrl}
-                    clientOptions={clientOptions}
-                    termOptions={termOptions}
-                    flowControl={flowControl}
-                    sessionTimeout={sessionTimeout}
-                    onAuthRequired={this.handleAuthRequired}
-                />
-                {loginEnabled && (
-                    <button class="logout-button" type="button" onClick={this.handleLogout} disabled={loggingOut}>
-                        {loggingOut ? 'Signing out…' : 'Sign out'}
-                    </button>
-                )}
-                {error && (
-                    <div class="logout-error" role="alert">
-                        {error}
-                    </div>
-                )}
-            </Fragment>
+            <Workspace
+                wsUrl={wsUrl}
+                tokenUrl={tokenUrl}
+                sessionsUrl={sessionsUrl}
+                clientOptions={clientOptions}
+                termOptions={termOptions}
+                flowControl={flowControl}
+                sessionTimeout={sessionTimeout}
+                loginEnabled={loginEnabled}
+                loggingOut={loggingOut}
+                error={error}
+                onAuthRequired={this.handleAuthRequired}
+                onLogout={this.handleLogout}
+            />
         );
     }
 }

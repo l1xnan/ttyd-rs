@@ -4,6 +4,7 @@ import {
     DEFAULT_TRZSZ_DRAG_INIT_TIMEOUT,
     activePreferenceEntries,
     parseQueryOptions,
+    resolveSessionTimeout,
 } from './prefs';
 
 describe('client options', () => {
@@ -37,5 +38,16 @@ describe('client options', () => {
         }).map(([key]) => key);
 
         expect(keys).toEqual(['enableZmodem', 'enableTrzsz', 'enableSixel']);
+    });
+});
+
+describe('resolveSessionTimeout', () => {
+    it('uses the server value and applies the query override', () => {
+        expect(resolveSessionTimeout(30, '')).toBe(30);
+        expect(resolveSessionTimeout(30, '?sessionTimeout=0')).toBe(0);
+        expect(resolveSessionTimeout(0, '?sessionTimeout=45')).toBe(45);
+        expect(resolveSessionTimeout(30, '?sessionTimeout=9999')).toBe(3600);
+        expect(resolveSessionTimeout(Number.NaN, '?other=1')).toBe(0);
+        expect(resolveSessionTimeout(-1, '?sessionTimeout=-5')).toBe(0);
     });
 });

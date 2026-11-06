@@ -62,10 +62,14 @@ export function parseSessionsResponse(input: unknown): SessionsResponse | undefi
     return { sessions, history };
 }
 
-/** Live sessions except the one this tab is currently attached to. */
-export function runningSessions(data: SessionsResponse | undefined, currentId?: string): SessionSummary[] {
+/** Live sessions except the ones this page is already attached to. */
+export function runningSessions(
+    data: SessionsResponse | undefined,
+    currentId?: string | readonly string[]
+): SessionSummary[] {
     if (!data) return [];
-    return data.sessions.filter(session => session.id !== currentId);
+    const excluded = new Set(currentId === undefined ? [] : typeof currentId === 'string' ? [currentId] : currentId);
+    return data.sessions.filter(session => !excluded.has(session.id));
 }
 
 export function shortId(id: string): string {

@@ -73,6 +73,22 @@ export function parseQueryOptions(
     return prefs;
 }
 
+/**
+ * Resolve the session timeout sent to the server. The server value is the
+ * default; `?sessionTimeout=N` overrides it for this page.
+ */
+export function resolveSessionTimeout(base: number, search: string): number {
+    let timeout = Number.isFinite(base) && base >= 0 ? base : 0;
+    const override = new URLSearchParams(search).get('sessionTimeout');
+    if (override !== null) {
+        const parsed = Number.parseInt(override, 10);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+            timeout = parsed;
+        }
+    }
+    return Math.min(Math.trunc(timeout), 3600);
+}
+
 /** Skip a blank fixed title without dropping the options that follow it. */
 export function activePreferenceEntries(prefs: object): Array<[string, any]> {
     const entries: Array<[string, any]> = [];

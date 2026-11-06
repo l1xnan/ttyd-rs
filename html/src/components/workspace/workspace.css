@@ -1,0 +1,230 @@
+.workspace {
+  --tabbar-height: 40px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.workspace-tabbar {
+  position: relative;
+  z-index: 35;
+  display: flex;
+  flex: 0 0 var(--tabbar-height);
+  align-items: center;
+  gap: 8px;
+  height: var(--tabbar-height);
+  padding: 0 12px;
+  border-bottom: 1px solid #333a34;
+  background: #1d211e;
+  color: #e3e7e1;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+
+.workspace-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.workspace-tab {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: #aab3ab;
+  cursor: pointer;
+  font-size: 11px;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.workspace-tab:hover {
+  background: #222823;
+  color: #e3e7e1;
+}
+
+.workspace-tab--active {
+  border-color: #5a655c;
+  background: #222823;
+  color: #e3e7e1;
+}
+
+.workspace-tab--error {
+  border-color: #e58b78;
+}
+
+.workspace-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tab-close {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 14px;
+  opacity: 0;
+}
+
+.workspace-tab:hover .workspace-tab-close,
+.workspace-tab--active .workspace-tab-close,
+.workspace-tab-close:focus-visible {
+  opacity: 0.75;
+}
+
+.workspace-tab-close:hover {
+  opacity: 1;
+}
+
+.workspace-tab-close:focus-visible,
+.workspace-add:focus-visible {
+  outline: 2px solid #d6a55c;
+  outline-offset: 2px;
+}
+
+.workspace-add {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #3b423c;
+  border-radius: 5px;
+  background: rgb(24 27 25 / 82%);
+  color: #aab3ab;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.workspace-add:hover {
+  border-color: #5a655c;
+  color: #e3e7e1;
+}
+
+.workspace-tabbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-end-replay {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #5a655c;
+  border-radius: 5px;
+  background: #222823;
+  color: #e3e7e1;
+  cursor: pointer;
+  font:
+    600 10px/1 ui-monospace,
+    'SFMono-Regular',
+    Consolas,
+    'Liberation Mono',
+    monospace;
+}
+
+.workspace-end-replay:hover {
+  border-color: #d6a55c;
+}
+
+.workspace-end-replay:focus-visible {
+  outline: 2px solid #d6a55c;
+  outline-offset: 2px;
+}
+
+/* Sessions and Sign out live in the tab bar instead of floating over it. */
+.workspace-tabbar .session-panel,
+.workspace-tabbar .session-toggle,
+.workspace-tabbar .logout-button {
+  position: static;
+  top: auto;
+  right: auto;
+  z-index: auto;
+  height: 28px;
+  opacity: 1;
+}
+
+/* login.css defines --login-* on .login-page, not globally. */
+.workspace-tabbar .logout-button:hover,
+.workspace-tabbar .logout-button:focus-visible {
+  color: #e3e7e1;
+}
+
+.workspace-tabbar .logout-button:focus-visible {
+  outline-color: #d6a55c;
+}
+
+.workspace .session-drawer {
+  top: calc(var(--tabbar-height) + 8px);
+  z-index: 36;
+}
+
+/* No z-index here: the fixed zmodem modal (z-index 40) must stay on top. */
+.workspace-panes {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Layout for the panes only; .terminal-container sizing lives in style/index.css. */
+.terminal-pane {
+  position: absolute;
+  inset: 0;
+}
+
+@media (max-width: 520px) {
+  .workspace-tabbar {
+    gap: 4px;
+    padding: 0 8px;
+  }
+
+  .workspace-tab {
+    max-width: 104px;
+  }
+
+  .workspace .session-drawer {
+    top: calc(var(--tabbar-height) + 8px);
+    right: 16px;
+    left: 16px;
+    width: auto;
+    max-height: calc(100dvh - var(--tabbar-height) - 32px);
+  }
+}
+
+@media (hover: none) {
+  .workspace-tab-close {
+    opacity: 0.75;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-tab,
+  .workspace .session-drawer {
+    transition: none;
+    animation: none;
+  }
+}
