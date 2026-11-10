@@ -29,6 +29,10 @@ pub(crate) const CLOSE_TOO_LARGE: u16 = 1009;
 pub(crate) const CLOSE_ERROR: u16 = 1011;
 const PAUSE_BUFFER_LIMIT: usize = 1024 * 1024;
 const REPLAY_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Server -> client. Same payload as `0`, but marks replayed history so the
+/// browser can render it without feeding it to ZMODEM/trzsz detection again.
+const COMMAND_REPLAY_OUTPUT: u8 = b'5';
 const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub async fn handler(
@@ -128,6 +132,8 @@ struct Initial {
     session: Option<String>,
     session_timeout: Option<u64>,
     attach_only: bool,
+    /// The client understands command `5` for replayed output.
+    replay_frames: bool,
 }
 
 /// Keeps a session attached for as long as the WebSocket lifetime, even when
@@ -206,6 +212,7 @@ async fn run_socket(
             &state,
             initial.session.as_deref(),
             user.as_deref(),
+            initial.replay_frames,
         )
         .await?;
         return Ok(());
@@ -249,7 +256,7 @@ async fn run_socket(
     let mut events = session.pty.subscribe();
     let mut status_rx = session.pty.status();
     let (snapshot, mut last_offset) = session.pty.snapshot();
-    send_replay(&mut socket, &snapshot).await?;
+    send_replay(&mut socket, &snapshot, initial.replay_frames).await?;
 
     let mut paused = false;
     let mut pending: Option<Bytes> = None;
@@ -468,6 +475,7 @@ async fn replay_history(
     state: &Arc<AppState>,
     session_id: Option<&str>,
     owner: Option<&str>,
+    replay_frames: bool,
 ) -> anyhow::Result<()> {
     let Some(session_id) = session_id else {
         close(socket, CLOSE_NORMAL).await;
@@ -487,7 +495,7 @@ async fn replay_history(
         }
         Lookup::Found(replay) => {
             info!("replaying history for session: {session_id}");
-            send_replay(socket, &replay.output).await?;
+            send_replay(socket, &replay.output, replay_frames).await?;
             let body = serde_json::json!({
                 "readonly": true,
                 "exitCode": replay.exit_code,
@@ -667,19 +675,33 @@ async fn wait_initial(
             .get("attachOnly")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let replay_frames = value
+            .get("replayFrames")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         return Ok(Some(Initial {
             columns,
             rows,
             session,
             session_timeout,
             attach_only,
+            replay_frames,
         }));
     }
 }
 
-async fn send_replay(socket: &mut WebSocket, data: &[u8]) -> anyhow::Result<()> {
+async fn send_replay(
+    socket: &mut WebSocket,
+    data: &[u8],
+    replay_frames: bool,
+) -> anyhow::Result<()> {
+    let command = if replay_frames {
+        COMMAND_REPLAY_OUTPUT
+    } else {
+        b'0'
+    };
     for chunk in data.chunks(REPLAY_CHUNK_SIZE) {
-        send_output(socket, chunk).await?;
+        send_frame(socket, command, chunk).await?;
     }
     Ok(())
 }

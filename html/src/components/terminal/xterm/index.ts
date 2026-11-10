@@ -10,6 +10,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
 import { ZmodemAddon } from './addons/zmodem';
 import { buildHandshake, parseReadonlyFrame } from './handshake';
+import { bypassesTransferFilter, REPLAY_OUTPUT } from './frames';
 import {
     activePreferenceEntries,
     parseQueryOptions,
@@ -80,6 +81,13 @@ export interface XtermOptions {
 }
 
 const DEFAULT_TITLE = 'ttyd - Terminal';
+
+/**
+ * Upper bound of one trzsz `#DATA:` chunk before encoding. The server rejects
+ * `0` input payloads above 256 KiB, and trzsz can double a chunk with escape
+ * sequences (base64 is ~1.34x), so 96 KiB keeps every frame well inside it.
+ */
+const MAX_TRZSZ_DATA_CHUNK = 96 * 1024;
 
 function toDisposable(f: () => void): IDisposable {
     return { dispose: f };
@@ -521,6 +529,7 @@ export class Xterm {
             session,
             sessionTimeout: this.sessionTimeout(),
             attachOnly: this.attachOnly,
+            replayFrames: true,
         });
         this.socket?.send(textEncoder.encode(msg));
 
@@ -635,9 +644,10 @@ export class Xterm {
 
         switch (cmd) {
             case Command.OUTPUT:
-                // History output bypasses the zmodem parser so the replay is
-                // always rendered verbatim.
-                if (this.readOnly) {
+            case REPLAY_OUTPUT:
+                // Replayed history is written verbatim: it was already shown
+                // before the reconnect and must not re-trigger a `trz` upload.
+                if (bypassesTransferFilter(cmd, this.readOnly)) {
                     this.writeData(new Uint8Array(data));
                 } else {
                     this.writeFunc(data);
@@ -696,6 +706,7 @@ export class Xterm {
                 trzsz: prefs.enableTrzsz,
                 windows: prefs.isWindows,
                 trzszDragInitTimeout: prefs.trzszDragInitTimeout,
+                maxDataChunkSize: MAX_TRZSZ_DATA_CHUNK,
                 onSend: this.sendCb,
                 sender: this.sendData,
                 writer: this.writeData,

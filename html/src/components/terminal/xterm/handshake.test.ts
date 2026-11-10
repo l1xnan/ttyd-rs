@@ -56,6 +56,34 @@ describe('websocket handshake', () => {
         expect(message.session).toBe('history-id');
         expect(message.sessionTimeout).toBe(30);
     });
+
+    it('advertises replay frame support so the server can use command 5', () => {
+        const message = JSON.parse(
+            buildHandshake({
+                token: 'secret',
+                columns: 80,
+                rows: 24,
+                session: 'live-id',
+                sessionTimeout: 30,
+                replayFrames: true,
+            })
+        );
+
+        expect(message.replayFrames).toBe(true);
+    });
+
+    it('omits replayFrames when the caller does not opt in', () => {
+        const message = JSON.parse(
+            buildHandshake({
+                token: 'secret',
+                columns: 80,
+                rows: 24,
+                sessionTimeout: 30,
+            })
+        );
+
+        expect(Object.prototype.hasOwnProperty.call(message, 'replayFrames')).toBe(false);
+    });
 });
 
 describe('readonly replay frame', () => {

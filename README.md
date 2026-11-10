@@ -188,6 +188,11 @@ each tab has its own session and opening a new tab starts a fresh command.
   `0` disables persistence and terminates the command immediately after the last
   client disconnects.
 - `--session-buffer-size <bytes>` changes the in-memory replay buffer size.
+- Replayed output is sent with frame `5` when the client advertises
+  `"replayFrames": true` in the handshake, and with frame `0` otherwise for
+  compatibility with older clients. The browser renders frame `5` verbatim, so a
+  reconnect never feeds already-consumed bytes into ZMODEM or trzsz detection
+  again — a replayed `trz` prompt cannot open the file picker a second time.
 - Add `?sessionTimeout=N` to the page URL to override the timeout for that tab
   (maximum 3600 seconds). The override cannot re-enable persistence when the
   server was started with `--session-timeout 0`.
@@ -277,6 +282,16 @@ ttyd -W -t enableTrzsz=true bash
 - ZMODEM can be enabled at the same time with
   `-t enableZmodem=true -t enableTrzsz=true`. ZMODEM still works when no trzsz
   transfer is in progress.
+- The browser's File System Access API exists only on HTTPS or `localhost`. On a
+  plain HTTP address, such as a LAN IP, ttyd substitutes a native file picker:
+  uploads still work, directory picks use `webkitdirectory`, and `tsz` saves each
+  file as a separate browser download instead of writing into a folder you
+  choose. Enable TLS (`-S -C <cert> -K <key>`) or an HTTPS reverse proxy for the
+  full behaviour.
+- Input frames are capped at 256 KiB by the server, so the browser limits a
+  trzsz data chunk to 96 KiB before encoding. Raising `-f` / `--srv-buf-size`
+  does not change that limit; it only controls how much the PTY delivers per
+  read.
 
 ### Sixel
 

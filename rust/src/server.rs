@@ -1268,6 +1268,7 @@ mod protocol_tests {
 
     struct HistoryReplayFrames {
         output: Vec<u8>,
+        replay: Vec<u8>,
         readonly: Option<serde_json::Value>,
         close_code: Option<u16>,
     }
@@ -1276,11 +1277,16 @@ mod protocol_tests {
         fn text(&self) -> String {
             String::from_utf8_lossy(&self.output).into_owned()
         }
+
+        fn replay_text(&self) -> String {
+            String::from_utf8_lossy(&self.replay).into_owned()
+        }
     }
 
     async fn read_history_replay(socket: &mut Client) -> HistoryReplayFrames {
         let mut frames = HistoryReplayFrames {
             output: Vec::new(),
+            replay: Vec::new(),
             readonly: None,
             close_code: None,
         };
@@ -1303,6 +1309,7 @@ mod protocol_tests {
             match message {
                 Message::Binary(data) => match data.first().copied() {
                     Some(b'0') => frames.output.extend_from_slice(&data[1..]),
+                    Some(b'5') => frames.replay.extend_from_slice(&data[1..]),
                     Some(b'4') => {
                         frames.readonly = serde_json::from_slice(&data[1..]).ok();
                     }
@@ -1381,6 +1388,15 @@ mod protocol_tests {
         session: Option<&str>,
         session_timeout: Option<u64>,
     ) -> Message {
+        init_message_with_replay(token, session, session_timeout, false)
+    }
+
+    fn init_message_with_replay(
+        token: &str,
+        session: Option<&str>,
+        session_timeout: Option<u64>,
+        replay_frames: bool,
+    ) -> Message {
         let mut body = serde_json::json!({
             "AuthToken": token,
             "columns": 80,
@@ -1392,32 +1408,44 @@ mod protocol_tests {
         if let Some(session_timeout) = session_timeout {
             body["sessionTimeout"] = serde_json::Value::from(session_timeout);
         }
+        if replay_frames {
+            body["replayFrames"] = serde_json::Value::Bool(true);
+        }
         Message::Text(body.to_string().into())
     }
 
     fn init_message_attach_only(session: &str) -> Message {
-        Message::Text(
-            serde_json::json!({
-                "AuthToken": "",
-                "columns": 80,
-                "rows": 24,
-                "session": session,
-                "attachOnly": true,
-            })
-            .to_string()
-            .into(),
-        )
+        init_message_attach_only_with_replay(session, false)
+    }
+
+    fn init_message_attach_only_with_replay(session: &str, replay_frames: bool) -> Message {
+        let mut body = serde_json::json!({
+            "AuthToken": "",
+            "columns": 80,
+            "rows": 24,
+            "session": session,
+            "attachOnly": true,
+        });
+        if replay_frames {
+            body["replayFrames"] = serde_json::Value::Bool(true);
+        }
+        Message::Text(body.to_string().into())
     }
 
     #[derive(Default)]
     struct SessionFrames {
         session: Option<String>,
         output: Vec<u8>,
+        replay: Vec<u8>,
     }
 
     impl SessionFrames {
         fn text(&self) -> String {
             String::from_utf8_lossy(&self.output).into_owned()
+        }
+
+        fn replay_text(&self) -> String {
+            String::from_utf8_lossy(&self.replay).into_owned()
         }
     }
 
@@ -1453,6 +1481,9 @@ mod protocol_tests {
                                 .unwrap();
                         }
                         frames.output.extend_from_slice(payload);
+                    }
+                    Some(b'5') => {
+                        frames.replay.extend_from_slice(&data[1..]);
                     }
                     Some(b'3') => {
                         frames.session = Some(String::from_utf8_lossy(&data[1..]).into_owned());
@@ -2022,6 +2053,31 @@ mod protocol_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversized_input_is_still_rejected_after_negotiation() {
+        let script = if cfg!(windows) {
+            "ping -n 31 127.0.0.1 >nul"
+        } else {
+            "sleep 30"
+        };
+        let mut config = test_config(shell(script), "sleep");
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+        let mut socket = connect(addr, None).await;
+        read_initial(&mut socket).await;
+        socket
+            .send(init_message_with_replay("", None, None, true))
+            .await
+            .unwrap();
+        let mut frame = vec![0u8; MAX_INPUT_FRAME + 2];
+        frame[0] = b'0';
+        socket.send(Message::Binary(frame.into())).await.unwrap();
+
+        let end = finish(&mut socket, None).await;
+        shutdown.cancel();
+        assert_eq!(end.close_code, CLOSE_TOO_LARGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconnect_reuses_the_session_and_replays_output() {
         let mut config = test_config(long_lived_session_command(), "session");
         config.writable = true;
@@ -2055,6 +2111,87 @@ mod protocol_tests {
             frames.text().contains("session-marker"),
             "replayed output was {}",
             frames.text()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn negotiated_replay_uses_frame_five() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut first = connect(addr, None).await;
+        read_initial(&mut first).await;
+        first.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut first, |frames| {
+            frames.session.is_some() && frames.text().contains("session-marker")
+        })
+        .await;
+        let session = frames.session.clone().expect("session id");
+        first.close(None).await.unwrap();
+        drop(first);
+
+        let mut second = connect(addr, None).await;
+        read_initial(&mut second).await;
+        second
+            .send(init_message_with_replay("", Some(&session), Some(30), true))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut second, |frames| {
+            frames.session.is_some() && frames.replay_text().contains("session-marker")
+        })
+        .await;
+        shutdown.cancel();
+
+        assert!(
+            frames.replay_text().contains("session-marker"),
+            "replayed output was {}",
+            frames.replay_text()
+        );
+        assert!(
+            !frames.text().contains("session-marker"),
+            "replay leaked into live frames: {}",
+            frames.text()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_client_still_receives_replay_as_frame_zero() {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut first = connect(addr, None).await;
+        read_initial(&mut first).await;
+        first.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut first, |frames| {
+            frames.session.is_some() && frames.text().contains("session-marker")
+        })
+        .await;
+        let session = frames.session.clone().expect("session id");
+        first.close(None).await.unwrap();
+        drop(first);
+
+        let mut second = connect(addr, None).await;
+        read_initial(&mut second).await;
+        second
+            .send(init_message_with_session("", Some(&session), Some(30)))
+            .await
+            .unwrap();
+        let frames = read_session_frames(&mut second, |frames| {
+            frames.session.is_some() && frames.text().contains("session-marker")
+        })
+        .await;
+        shutdown.cancel();
+
+        assert!(
+            frames.text().contains("session-marker"),
+            "replayed output was {}",
+            frames.text()
+        );
+        assert!(
+            frames.replay.is_empty(),
+            "an unnegotiated client must not receive frame 5"
         );
     }
 
@@ -2207,6 +2344,46 @@ mod protocol_tests {
         );
 
         shutdown.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn negotiated_history_replay_uses_frame_five() {
+        let mut config = test_config(history_command(), "history");
+        config.writable = true;
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let mut socket = connect(addr, None).await;
+        read_initial(&mut socket).await;
+        socket.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut socket, |frames| frames.session.is_some()).await;
+        let id = frames.session.clone().expect("session id");
+        let end = finish(&mut socket, None).await;
+        assert_eq!(end.close_code, CLOSE_ERROR);
+        wait_for_history(addr, &id, &[]).await;
+
+        let mut replay = connect(addr, None).await;
+        read_initial(&mut replay).await;
+        replay
+            .send(init_message_attach_only_with_replay(&id, true))
+            .await
+            .unwrap();
+        let frames = read_history_replay(&mut replay).await;
+        shutdown.cancel();
+
+        assert!(
+            frames.replay_text().contains("history-marker"),
+            "replay was {}",
+            frames.replay_text()
+        );
+        assert!(
+            !frames.text().contains("history-marker"),
+            "history leaked into frame 0: {}",
+            frames.text()
+        );
+        let readonly = frames.readonly.expect("frame 4");
+        assert_eq!(readonly["readonly"], true);
+        assert_eq!(readonly["exitCode"].as_i64(), Some(7));
+        assert_eq!(frames.close_code, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

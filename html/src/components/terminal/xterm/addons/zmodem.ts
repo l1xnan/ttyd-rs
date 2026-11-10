@@ -3,6 +3,7 @@ import { saveAs } from 'file-saver';
 import { IDisposable, ITerminalAddon, Terminal } from '@xterm/xterm';
 import Zmodem from 'zmodem-ts';
 import { TrzszFilter } from 'trzsz';
+import { installFileSystemFallback } from './fs-picker';
 
 const SEND_CHUNK_SIZE = 64 * 1024;
 
@@ -67,6 +68,8 @@ export interface ZmodeOptions {
     trzsz: boolean;
     windows: boolean;
     trzszDragInitTimeout: number;
+    /** Upper bound of one trzsz `#DATA:` chunk, in bytes before encoding. */
+    maxDataChunkSize?: number;
     onSend: () => void;
     sender: (data: string | Uint8Array) => void;
     writer: (data: string | Uint8Array) => void;
@@ -84,7 +87,7 @@ export class ZmodemAddon implements ITerminalAddon {
     private sentry: InstanceType<typeof Zmodem.Sentry>;
     private session: ZmodemSession | null = null;
     private denier: (() => void) | null = null;
-    private trzszFilter: TrzszFilter;
+    private trzszFilter?: TrzszFilter;
 
     constructor(private options: ZmodeOptions) {}
 
@@ -95,6 +98,17 @@ export class ZmodemAddon implements ITerminalAddon {
     }
 
     dispose() {
+        // A transfer may still hold timers and promises whose sender is bound to
+        // the Xterm instance. Stop it before the socket is replaced, otherwise
+        // the stale `#ACT:` / `#DATA:` could be written into the new connection.
+        try {
+            this.trzszFilter?.stopTransferringFiles();
+        } catch (e) {
+            console.error('[ttyd] zmodem dispose: ', e);
+        }
+        this.trzszFilter = undefined;
+        this.session = null;
+        this.denier = null;
         for (const d of this.disposables) {
             d.dispose();
         }
@@ -104,7 +118,7 @@ export class ZmodemAddon implements ITerminalAddon {
     consume(data: ArrayBuffer) {
         try {
             if (this.options.trzsz) {
-                this.trzszFilter.processServerOutput(data);
+                this.trzszFilter?.processServerOutput(data);
             } else {
                 this.sentry.consume(data);
             }
@@ -161,9 +175,19 @@ export class ZmodemAddon implements ITerminalAddon {
     private trzszInit() {
         const { terminal } = this;
         const { sender, writer, zmodem } = this.options;
+        // trzsz only talks to the File System Access API in a browser, and that
+        // API is hidden on insecure origins (plain HTTP on a LAN address). The
+        // fallback restores the pickers through a hidden file input.
+        if (installFileSystemFallback()) {
+            console.warn(
+                '[ttyd] File System Access API is unavailable on this origin; ' +
+                    'trzsz falls back to a native file picker. Use HTTPS or localhost ' +
+                    'to pick and save whole directories.'
+            );
+        }
         this.trzszFilter = new TrzszFilter({
             writeToTerminal: data => {
-                if (!this.trzszFilter.isTransferringFiles() && zmodem) {
+                if (!this.trzszFilter?.isTransferringFiles() && zmodem) {
                     this.sentry.consume(data);
                 } else {
                     writer(typeof data === 'string' ? data : new Uint8Array(data as ArrayBuffer));
@@ -173,6 +197,7 @@ export class ZmodemAddon implements ITerminalAddon {
             terminalColumns: terminal.cols,
             isWindowsShell: this.options.windows,
             dragInitTimeout: this.options.trzszDragInitTimeout,
+            maxDataChunkSize: this.options.maxDataChunkSize,
             chooseSendFiles: this.options.chooseSendFiles,
             chooseSaveDirectory: this.options.chooseSaveDirectory,
         });
@@ -181,11 +206,11 @@ export class ZmodemAddon implements ITerminalAddon {
         this.addDisposableListener(element, 'drop', event => {
             event.preventDefault();
             this.trzszFilter
-                .uploadFiles((event as DragEvent).dataTransfer?.items as DataTransferItemList)
+                ?.uploadFiles((event as DragEvent).dataTransfer?.items as DataTransferItemList)
                 .then(() => console.log('[ttyd] upload success'))
                 .catch(err => console.log('[ttyd] upload failed: ' + err));
         });
-        this.disposables.push(terminal.onResize(size => this.trzszFilter.setTerminalColumns(size.cols)));
+        this.disposables.push(terminal.onResize(size => this.trzszFilter?.setTerminalColumns(size.cols)));
     }
 
     @bind

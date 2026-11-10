@@ -5,6 +5,8 @@ export interface HandshakeOptions {
     session?: string;
     sessionTimeout: number;
     attachOnly?: boolean;
+    /** This client understands command `5` for replayed output. */
+    replayFrames?: boolean;
 }
 
 /**
@@ -21,6 +23,9 @@ export function buildHandshake(options: HandshakeOptions): string {
     };
     if (options.attachOnly === true) {
         message.attachOnly = true;
+    }
+    if (options.replayFrames === true) {
+        message.replayFrames = true;
     }
     return JSON.stringify(message);
 }

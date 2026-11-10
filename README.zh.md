@@ -153,6 +153,7 @@ ttyd -c user:pass bash
 
 - `--session-timeout <seconds>` 调整断开后保留会话的时间。设为 `0` 会禁用会话保持，并在最后一个客户端断开后立即终止命令。
 - `--session-buffer-size <bytes>` 调整内存中的输出回放缓冲大小。
+- 客户端在握手 JSON 中声明 `"replayFrames": true` 时，回放输出改用帧 `5` 发送；未声明时仍用帧 `0`，以兼容旧客户端。浏览器收到帧 `5` 会直接写入终端，不经过 ZMODEM/trzsz 解析，因此重连不会让回放里的 `trz` 提示再次弹出文件选择框。
 - 在页面 URL 后添加 `?sessionTimeout=N` 可覆盖当前标签页的超时时间（最大 3600 秒）。如果服务端以 `--session-timeout 0` 启动，该覆盖值无法重新启用会话保持。
 - `-q` / `--exit-no-conn` 与 `-o` / `--once` 保持原有语义，可能在刷新后的页面重连前退出。
 
@@ -198,6 +199,8 @@ ttyd -W -t enableTrzsz=true bash
 - `trz` 从浏览器上传文件，`tsz 文件` 把文件下载到浏览器。
 - 把文件拖进终端也会上传。拖放之后 ttyd 会在终端里启动 `trz`，并在 `-t trzszDragInitTimeout` 毫秒内等待服务端响应，默认 3000。
 - 可以和 ZMODEM 一起打开：`-t enableZmodem=true -t enableTrzsz=true`。没有 trzsz 传输在进行时，ZMODEM 仍然可用。
+- trzsz 依赖浏览器的 File System Access API，而该 API 只在 HTTPS 或 `localhost` 下可用。用普通 HTTP 地址（例如局域网 IP）访问时，ttyd 会退化成原生文件选择框：上传照常可用，选目录走 `webkitdirectory`，`tsz` 下载则变成每个文件单独触发一次浏览器下载，而不是写进你指定的目录。需要完整行为请开启 TLS（`-S -C <证书> -K <私钥>`）或放到 HTTPS 反向代理后面。
+- 服务端单帧输入上限为 256 KiB，因此浏览器会把 trzsz 的数据分块限制在 96 KiB（编码前）。调大 `-f` / `--srv-buf-size` 不会改变该上限，它只控制 PTY 每次读取的字节数。
 
 ### Sixel
 

@@ -95,6 +95,27 @@ describe('ZMODEM and trzsz', () => {
         created.dispose();
     });
 
+    it('disposes safely with or without trzsz, and more than once', () => {
+        const withTrzsz = addon({
+            zmodem: false,
+            trzsz: true,
+            sender() {},
+            writer() {},
+        });
+        expect(() => {
+            withTrzsz.dispose();
+            withTrzsz.dispose();
+        }).not.toThrow();
+
+        const withoutTrzsz = addon({
+            zmodem: true,
+            trzsz: false,
+            sender() {},
+            writer() {},
+        });
+        expect(() => withoutTrzsz.dispose()).not.toThrow();
+    });
+
     it('formats an empty file and kilobyte progress', () => {
         expect(formatTransferSize(0, 2)).toBe('0');
         expect(formatTransferSize(1024, 2)).toBe('1.00 KB');
