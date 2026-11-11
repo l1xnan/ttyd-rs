@@ -4,6 +4,11 @@
 //! session id and its owner, and must carry `X-TTYD-Transfer: 1` (cross-site
 //! requests cannot set that header without a CORS preflight).
 
+// A ready-made `Response` is the natural error type for these helpers: every
+// failure is returned to the client unchanged. Boxing it at each of the call
+// sites would only add noise, and the helpers are per-request, not hot paths.
+#![allow(clippy::result_large_err)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
