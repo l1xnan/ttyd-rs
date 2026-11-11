@@ -51,6 +51,11 @@ interface TokenResponse {
     token: string;
     login?: boolean;
     sessionTimeout?: number;
+    /** Authoritative server switch: `--http-transfer` together with `-W`. */
+    httpTransfer?: boolean;
+    httpTransferMaxUpload?: number;
+    httpTransferFollowCwd?: boolean;
+    httpTransferDir?: string | null;
 }
 
 type Status = 'checking' | 'login' | 'terminal' | 'error';
@@ -61,6 +66,10 @@ interface State {
     error: string;
     loggingOut: boolean;
     sessionTimeout: number;
+    transferEnabled: boolean;
+    transferMaxUpload: number;
+    transferDir?: string | null;
+    transferFollowCwd: boolean;
 }
 
 export class App extends Component<{}, State> {
@@ -70,6 +79,10 @@ export class App extends Component<{}, State> {
         error: '',
         loggingOut: false,
         sessionTimeout: 0,
+        transferEnabled: false,
+        transferMaxUpload: 0,
+        transferDir: null,
+        transferFollowCwd: true,
     };
 
     componentDidMount() {
@@ -105,6 +118,10 @@ export class App extends Component<{}, State> {
                     typeof data.sessionTimeout === 'number' && data.sessionTimeout >= 0
                         ? Math.min(Math.trunc(data.sessionTimeout), 3600)
                         : 0,
+                transferEnabled: data.httpTransfer === true,
+                transferMaxUpload: typeof data.httpTransferMaxUpload === 'number' ? data.httpTransferMaxUpload : 0,
+                transferDir: typeof data.httpTransferDir === 'string' ? data.httpTransferDir : null,
+                transferFollowCwd: data.httpTransferFollowCwd === true,
             });
         } catch (error) {
             console.error(`[ttyd] fetch ${tokenUrl}: `, error);
@@ -154,7 +171,20 @@ export class App extends Component<{}, State> {
         }
     }
 
-    render(_: {}, { status, loginEnabled, error, loggingOut, sessionTimeout }: State) {
+    render(
+        _: {},
+        {
+            status,
+            loginEnabled,
+            error,
+            loggingOut,
+            sessionTimeout,
+            transferEnabled,
+            transferMaxUpload,
+            transferDir,
+            transferFollowCwd,
+        }: State
+    ) {
         if (status === 'checking') {
             return (
                 <main class="login-page">
@@ -202,6 +232,10 @@ export class App extends Component<{}, State> {
                 termOptions={termOptions}
                 flowControl={flowControl}
                 sessionTimeout={sessionTimeout}
+                transferEnabled={transferEnabled}
+                transferMaxUpload={transferMaxUpload}
+                transferDir={transferDir}
+                transferFollowCwd={transferFollowCwd}
                 loginEnabled={loginEnabled}
                 loggingOut={loggingOut}
                 error={error}

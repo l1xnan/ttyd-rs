@@ -175,6 +175,9 @@ struct SessionStateInner {
     attached: usize,
     detached_at: Option<Instant>,
     timeout: Duration,
+    /// In-flight HTTP file transfers must keep the session alive even when no
+    /// WebSocket client is attached (the reaper runs once per second).
+    active_transfers: usize,
 }
 
 pub struct ManagedSession {
@@ -185,6 +188,8 @@ pub struct ManagedSession {
     pub pty: Arc<PtySession>,
     created_at: SystemTime,
     state: Mutex<SessionStateInner>,
+    /// Serializes "check -> write temp -> rename" for clients sharing a session.
+    pub transfer_lock: tokio::sync::Mutex<()>,
 }
 
 /// Everything needed to attach to an existing session or start a new one.
@@ -216,7 +221,9 @@ impl ManagedSession {
                 attached: 1,
                 detached_at: None,
                 timeout,
+                active_transfers: 0,
             }),
+            transfer_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -270,9 +277,27 @@ impl ManagedSession {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.attached == 0
+            && state.active_transfers == 0
             && state
                 .detached_at
                 .is_some_and(|detached| now.saturating_duration_since(detached) >= state.timeout)
+    }
+
+    /// Keep this session alive while an HTTP transfer is in flight.
+    pub fn begin_transfer(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_transfers = state.active_transfers.saturating_add(1);
+    }
+
+    pub fn end_transfer(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_transfers = state.active_transfers.saturating_sub(1);
     }
 
     fn summary(&self) -> SessionSummary {
@@ -469,6 +494,29 @@ impl SessionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(id, owner)
+    }
+
+    /// Locate a *running* session and hand out its PTY handle.
+    ///
+    /// Unlike [`Self::get`] this returns the session itself so HTTP transfer
+    /// handlers can resolve its cwd and write files. Ended, expired and
+    /// read-only history sessions have no shell cwd to follow and are reported
+    /// as `NotFound`.
+    pub fn live(&self, id: &str, owner: Option<&str>) -> Lookup<Arc<ManagedSession>> {
+        if id.is_empty() || id.len() > 128 {
+            return Lookup::NotFound;
+        }
+        let now = Instant::now();
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match sessions.get(id) {
+            Some(session) if session.owner.as_deref() != owner => Lookup::Forbidden,
+            Some(session) if session.pty.is_exited() || session.is_expired(now) => Lookup::NotFound,
+            Some(session) => Lookup::Found(session.clone()),
+            None => Lookup::NotFound,
+        }
     }
 
     /// Read-only replay data for one ended session.
@@ -678,6 +726,12 @@ mod tests {
             prefs_json: "{}".to_owned(),
             command,
             command_string: "sleep".to_owned(),
+            http_transfer: false,
+            http_transfer_root: None,
+            http_transfer_dir: None,
+            http_transfer_max_upload: 64 * 1024 * 1024,
+            http_transfer_session_quota: 256 * 1024 * 1024,
+            http_transfer_follow_cwd: true,
         })
     }
 

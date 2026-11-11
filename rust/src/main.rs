@@ -1,10 +1,12 @@
 mod cli;
 mod config;
+mod cwd;
 mod html;
 mod pty;
 mod server;
 mod session;
 mod tls;
+mod transfer;
 mod ws;
 
 use cli::Action;

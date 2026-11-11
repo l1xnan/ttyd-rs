@@ -60,6 +60,12 @@ fn parse_args_from(
     let mut browser = false;
     let mut debug_level = 7i32;
     let mut terminal_type = "xterm-256color".to_owned();
+    let mut http_transfer = false;
+    let mut http_transfer_root: Option<PathBuf> = None;
+    let mut http_transfer_dir: Option<PathBuf> = None;
+    let mut http_transfer_max_upload = 64 * 1024 * 1024usize;
+    let mut http_transfer_session_quota = 256 * 1024 * 1024usize;
+    let mut http_transfer_follow_cwd = true;
 
     let mut prefs = serde_json::Map::new();
     #[cfg(windows)]
@@ -138,6 +144,18 @@ fn parse_args_from(
             Arg::Short('t') | Arg::Long("client-option") => {
                 add_client_option(&mut prefs, &take_string(&mut parser)?)?
             }
+            Arg::Long("http-transfer") => http_transfer = true,
+            Arg::Long("http-transfer-root") => http_transfer_root = Some(take_path(&mut parser)?),
+            Arg::Long("http-transfer-dir") => http_transfer_dir = Some(take_path(&mut parser)?),
+            Arg::Long("http-transfer-max-upload") => {
+                http_transfer_max_upload =
+                    parse_unsigned("http-transfer-max-upload", &take_string(&mut parser)?)?
+            }
+            Arg::Long("http-transfer-session-quota") => {
+                http_transfer_session_quota =
+                    parse_unsigned("http-transfer-session-quota", &take_string(&mut parser)?)?
+            }
+            Arg::Long("no-http-follow-cwd") => http_transfer_follow_cwd = false,
             Arg::Value(value) => {
                 command.push(value);
                 command.extend(parser.raw_args()?);
@@ -157,6 +175,40 @@ fn parse_args_from(
             bail!("invalid base-path: maximum length is 128");
         }
     }
+
+    let http_transfer_root = match http_transfer_root {
+        Some(path) => {
+            let canonical = path
+                .canonicalize()
+                .with_context(|| format!("invalid --http-transfer-root {}: ", path.display()))?;
+            if !canonical.is_dir() {
+                bail!(
+                    "--http-transfer-root is not a directory: {}",
+                    path.display()
+                );
+            }
+            Some(canonical)
+        }
+        None => None,
+    };
+    let http_transfer_dir = match http_transfer_dir {
+        Some(path) => {
+            let canonical = path
+                .canonicalize()
+                .with_context(|| format!("invalid --http-transfer-dir {}: ", path.display()))?;
+            if !canonical.is_dir() {
+                bail!("--http-transfer-dir is not a directory: {}", path.display());
+            }
+            Some(canonical)
+        }
+        None => None,
+    };
+    // A zero limit would reject every upload; fall back to axum's default.
+    let http_transfer_max_upload = if http_transfer_max_upload == 0 {
+        2 * 1024 * 1024
+    } else {
+        http_transfer_max_upload
+    };
 
     if command.is_empty() {
         bail!("missing start command");
@@ -250,6 +302,12 @@ fn parse_args_from(
         prefs_json,
         command,
         command_string,
+        http_transfer,
+        http_transfer_root,
+        http_transfer_dir,
+        http_transfer_max_upload,
+        http_transfer_session_quota,
+        http_transfer_follow_cwd,
     })))
 }
 
@@ -565,6 +623,12 @@ OPTIONS:\n\
         --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)\n\
         --session-buffer-size  Bytes of output retained for session replay (default: 4194304)\n\
         --history-limit        Ended sessions to keep for read-only replay (default: 20, 0 disables history)\n\
+        --http-transfer     Enable HTTP file transfer (requires -W)\n\
+        --http-transfer-dir           Upload destination when the shell cwd cannot be followed (default: -w / process cwd)\n\
+        --http-transfer-root          Restrict all file operations to this directory (optional whitelist)\n\
+        --http-transfer-max-upload    Maximum bytes per uploaded file (default: 67108864)\n\
+        --http-transfer-session-quota Approximate per-directory quota in bytes, 0 disables (default: 268435456)\n\
+        --no-http-follow-cwd  Always use --http-transfer-dir instead of following the shell cwd\n\
     -6, --ipv6              Enable IPv6 support\n\
     -S, --ssl               Enable SSL\n\
     -C, --ssl-cert          SSL certificate file path\n\
@@ -675,6 +739,81 @@ mod tests {
         assert_eq!(prefs["enableTrzsz"], true);
         assert_eq!(prefs["enableSixel"], true);
         assert_eq!(prefs["trzszDragInitTimeout"], 1500);
+    }
+
+    #[test]
+    fn parses_http_transfer_flags() {
+        let config = run_config([
+            "--http-transfer",
+            "-W",
+            "--http-transfer-max-upload",
+            "1024",
+            "--http-transfer-session-quota",
+            "0",
+            "--no-http-follow-cwd",
+            "bash",
+        ]);
+        assert!(config.http_transfer);
+        assert!(config.writable);
+        assert_eq!(config.http_transfer_max_upload, 1024);
+        assert_eq!(config.http_transfer_session_quota, 0);
+        assert!(!config.http_transfer_follow_cwd);
+        assert!(config.http_transfer_root.is_none());
+        assert!(config.http_transfer_dir.is_none());
+
+        let defaults = run_config(["bash"]);
+        assert!(!defaults.http_transfer);
+        assert_eq!(defaults.http_transfer_max_upload, 64 * 1024 * 1024);
+        assert_eq!(defaults.http_transfer_session_quota, 256 * 1024 * 1024);
+        assert!(defaults.http_transfer_follow_cwd);
+        assert_eq!(defaults.endpoints.files_upload, "/sessions/{id}/files");
+    }
+
+    #[test]
+    fn canonicalizes_http_transfer_dir_and_rejects_missing_dir() {
+        let dir = std::env::temp_dir().join(format!("ttyd-default-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args: Vec<OsString> = vec![
+            OsString::from("--http-transfer-dir"),
+            dir.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        let config = run_config(args);
+        assert_eq!(
+            config.http_transfer_dir.as_deref(),
+            Some(dir.canonicalize().unwrap().as_path())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        let missing: Vec<OsString> = vec![
+            OsString::from("--http-transfer-dir"),
+            dir.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        assert!(parse_args_from(missing, None).is_err());
+    }
+
+    #[test]
+    fn canonicalizes_http_transfer_root_and_rejects_missing_dir() {
+        let dir = std::env::temp_dir().join(format!("ttyd-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args: Vec<OsString> = vec![
+            OsString::from("--http-transfer-root"),
+            dir.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        let config = run_config(args);
+        assert_eq!(
+            config.http_transfer_root.as_deref(),
+            Some(dir.canonicalize().unwrap().as_path())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        let missing: Vec<OsString> = vec![
+            OsString::from("--http-transfer-root"),
+            dir.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        assert!(parse_args_from(missing, None).is_err());
     }
 
     #[test]

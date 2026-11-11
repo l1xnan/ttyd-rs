@@ -91,6 +91,14 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route(
             &session,
             get(session_handler).delete(delete_session_handler),
+        )
+        .route(
+            &state.config.endpoints.files_upload,
+            post(crate::transfer::upload_handler),
+        )
+        .route(
+            &state.config.endpoints.file_download,
+            get(crate::transfer::download_path_handler),
         );
 
     if !state.config.endpoints.parent.is_empty() {
@@ -396,6 +404,16 @@ async fn token_handler(
         "token": credential,
         "login": login,
         "sessionTimeout": state.config.session_timeout,
+        // Authoritative server-side switch: the UI must not rely on client
+        // options (URL query parameters can override those).
+        "httpTransfer": state.config.http_transfer && state.config.writable,
+        "httpTransferMaxUpload": state.config.http_transfer_max_upload,
+        "httpTransferFollowCwd": state.config.http_transfer_follow_cwd,
+        "httpTransferDir": state
+            .config
+            .http_transfer_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned()),
     })
     .to_string();
     Response::builder()
@@ -406,7 +424,7 @@ async fn token_handler(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn json_error(status: StatusCode, message: &str) -> Response {
+pub(crate) fn json_error(status: StatusCode, message: &str) -> Response {
     let body = serde_json::json!({ "error": message }).to_string();
     Response::builder()
         .status(status)
@@ -416,7 +434,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-fn no_store(status: StatusCode) -> Response {
+pub(crate) fn no_store(status: StatusCode) -> Response {
     let mut response = status.into_response();
     response
         .headers_mut()
@@ -424,7 +442,7 @@ fn no_store(status: StatusCode) -> Response {
     response
 }
 
-fn json_response<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
+pub(crate) fn json_response<T: serde::Serialize>(status: StatusCode, value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(body) => Response::builder()
             .status(status)
@@ -978,6 +996,27 @@ fn log_config(config: &Config) {
     if config.check_origin {
         info!("  check origin: true");
     }
+    if config.http_transfer {
+        info!(
+            "  http transfer: enabled, max upload: {} bytes, follow cwd: {}, default dir: {}, root: {}",
+            config.http_transfer_max_upload,
+            config.http_transfer_follow_cwd,
+            config
+                .http_transfer_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-w / process cwd".to_owned()),
+            config
+                .http_transfer_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "unrestricted".to_owned())
+        );
+        info!(
+            "  http transfer endpoints: {}",
+            config.endpoints.files_upload
+        );
+    }
     if config.url_arg {
         info!("  allow url arg: true");
     }
@@ -1005,6 +1044,7 @@ fn log_config(config: &Config) {
 mod protocol_tests {
     use std::ffi::OsString;
     use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1089,6 +1129,12 @@ mod protocol_tests {
             prefs_json: "{}".to_owned(),
             command,
             command_string: command_string.to_owned(),
+            http_transfer: false,
+            http_transfer_root: None,
+            http_transfer_dir: None,
+            http_transfer_max_upload: 64 * 1024 * 1024,
+            http_transfer_session_quota: 256 * 1024 * 1024,
+            http_transfer_follow_cwd: true,
         }
     }
 
@@ -2528,5 +2574,394 @@ mod protocol_tests {
         );
 
         shutdown.cancel();
+    }
+
+    // --- HTTP file transfer -------------------------------------------------
+
+    const TRANSFER_HEADERS: &[(&str, &str)] = &[("X-TTYD-Transfer", "1")];
+
+    fn transfer_root(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ttyd-transfer-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Deterministic fallback on every OS: never follow the shell cwd, always
+    /// use the configured default directory.
+    fn transfer_config(dir: &Path, override_config: impl FnOnce(&mut Config)) -> Config {
+        let mut config = test_config(long_lived_session_command(), "session");
+        config.http_transfer = true;
+        config.writable = true;
+        config.http_transfer_follow_cwd = false;
+        config.http_transfer_dir = Some(dir.to_path_buf());
+        config.http_transfer_root = None;
+        config.http_transfer_max_upload = 1024 * 1024;
+        config.http_transfer_session_quota = 0;
+        override_config(&mut config);
+        config
+    }
+
+    async fn start_transfer_session(
+        config: Config,
+    ) -> (SocketAddr, CancellationToken, Client, String) {
+        let (addr, shutdown) = spawn_server(config).await;
+        let mut socket = connect(addr, None).await;
+        socket.send(init_message("")).await.unwrap();
+        let frames = read_session_frames(&mut socket, |frames| frames.session.is_some()).await;
+        let id = frames.session.expect("session id");
+        (addr, shutdown, socket, id)
+    }
+
+    async fn transfer_request(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> String {
+        let mut request =
+            format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+        if !body.is_empty() {
+            request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+        for (name, value) in headers {
+            request.push_str(&format!("{name}: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        let mut bytes = request.into_bytes();
+        bytes.extend_from_slice(body);
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(&bytes).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+            .await
+            .expect("http request timed out")
+            .expect("failed to read http response");
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    fn files_path(id: &str) -> String {
+        format!("/sessions/{id}/files")
+    }
+
+    fn encoded_path(path: &Path) -> String {
+        form_urlencoded::byte_serialize(path.to_string_lossy().as_bytes()).collect()
+    }
+
+    fn download_url(id: &str, path: &Path) -> String {
+        format!("/sessions/{id}/download?path={}", encoded_path(path))
+    }
+
+    async fn upload(addr: SocketAddr, id: &str, name: &str, body: &[u8]) -> String {
+        let encoded: String = form_urlencoded::byte_serialize(name.as_bytes()).collect();
+        transfer_request(
+            addr,
+            "POST",
+            &format!("{}?name={encoded}", files_path(id)),
+            &[
+                ("X-TTYD-Transfer", "1"),
+                ("Content-Type", "application/octet-stream"),
+            ],
+            body,
+        )
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_disabled_returns_404() {
+        let dir = transfer_root("disabled");
+        let config = transfer_config(&dir, |config| config.http_transfer = false);
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let post = transfer_request(
+            addr,
+            "POST",
+            "/sessions/deadbeef/files?name=a.txt",
+            TRANSFER_HEADERS,
+            b"x",
+        )
+        .await;
+        assert!(post.starts_with("HTTP/1.1 404"), "response was {post}");
+        let download = transfer_request(
+            addr,
+            "GET",
+            "/sessions/deadbeef/download?path=%2Ftmp",
+            TRANSFER_HEADERS,
+            &[],
+        )
+        .await;
+        assert!(
+            download.starts_with("HTTP/1.1 404"),
+            "response was {download}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_requires_writable_returns_403() {
+        let dir = transfer_root("readonly");
+        let config = transfer_config(&dir, |config| config.writable = false);
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let response = transfer_request(
+            addr,
+            "GET",
+            "/sessions/deadbeef/download?path=%2Ftmp",
+            TRANSFER_HEADERS,
+            &[],
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "response was {response}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_uploads_to_default_dir_and_downloads_by_path() {
+        let dir = transfer_root("roundtrip");
+        let (addr, shutdown, _socket, id) =
+            start_transfer_session(transfer_config(&dir, |_| {})).await;
+
+        let uploaded = upload(addr, &id, "hello.txt", b"hello transfer").await;
+        assert!(
+            uploaded.starts_with("HTTP/1.1 200"),
+            "response was {uploaded}"
+        );
+        let result: serde_json::Value = serde_json::from_str(response_body(&uploaded)).unwrap();
+        assert_eq!(result["name"], "hello.txt");
+        assert_eq!(result["size"], 14);
+        assert!(
+            result["path"].as_str().unwrap().ends_with("hello.txt"),
+            "unexpected path: {result}"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("hello.txt")).unwrap(),
+            b"hello transfer"
+        );
+
+        let download = transfer_request(
+            addr,
+            "GET",
+            &download_url(&id, &dir.join("hello.txt")),
+            TRANSFER_HEADERS,
+            &[],
+        )
+        .await;
+        assert!(
+            download.starts_with("HTTP/1.1 200"),
+            "response was {download}"
+        );
+        assert!(
+            download.contains("hello transfer"),
+            "response was {download}"
+        );
+        assert_eq!(
+            header_value(&download, "x-content-type-options"),
+            Some("nosniff")
+        );
+        assert!(header_value(&download, "content-disposition")
+            .unwrap()
+            .contains("hello.txt"));
+
+        let duplicate = upload(addr, &id, "hello.txt", b"other").await;
+        assert!(
+            duplicate.starts_with("HTTP/1.1 409"),
+            "response was {duplicate}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_rejects_path_traversal_and_oversized_uploads() {
+        let dir = transfer_root("rejects");
+        let (addr, shutdown, _socket, id) =
+            start_transfer_session(transfer_config(&dir, |config| {
+                config.http_transfer_max_upload = 8
+            }))
+            .await;
+
+        for name in ["../evil.txt", "..", "a/b.txt", ""] {
+            let response = upload(addr, &id, name, b"x").await;
+            assert!(
+                response.starts_with("HTTP/1.1 400") || response.starts_with("HTTP/1.1 404"),
+                "unexpected response for {name}: {response}"
+            );
+        }
+
+        let oversized = upload(addr, &id, "big.txt", b"0123456789abcdef").await;
+        assert!(
+            oversized.starts_with("HTTP/1.1 413"),
+            "response was {oversized}"
+        );
+        assert!(!dir.join("big.txt").exists());
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            assert!(!entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".ttyd-upload-"));
+        }
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_rejects_cross_site_and_bad_content_type() {
+        let dir = transfer_root("csrf");
+        let (addr, shutdown, _socket, id) =
+            start_transfer_session(transfer_config(&dir, |_| {})).await;
+        let url = download_url(&id, &dir.join("missing.txt"));
+
+        let no_header = transfer_request(addr, "GET", &url, &[], &[]).await;
+        assert!(
+            no_header.starts_with("HTTP/1.1 403"),
+            "response was {no_header}"
+        );
+
+        let cross_site = transfer_request(
+            addr,
+            "GET",
+            &url,
+            &[("X-TTYD-Transfer", "1"), ("Sec-Fetch-Site", "cross-site")],
+            &[],
+        )
+        .await;
+        assert!(
+            cross_site.starts_with("HTTP/1.1 403"),
+            "response was {cross_site}"
+        );
+
+        let wrong_type = transfer_request(
+            addr,
+            "POST",
+            &format!("{}?name=a.txt", files_path(&id)),
+            &[("X-TTYD-Transfer", "1"), ("Content-Type", "text/plain")],
+            b"x",
+        )
+        .await;
+        assert!(
+            wrong_type.starts_with("HTTP/1.1 415"),
+            "response was {wrong_type}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_token_reports_authoritative_switch() {
+        let dir = transfer_root("token");
+        let (addr, shutdown) = spawn_server(transfer_config(&dir, |_| {})).await;
+        let response = http_request(addr, http_get(addr, "/token", None)).await;
+        let payload: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+        assert_eq!(payload["httpTransfer"], true);
+        assert_eq!(payload["httpTransferMaxUpload"], 1024 * 1024);
+        assert_eq!(payload["httpTransferFollowCwd"], false);
+        assert!(payload["httpTransferDir"]
+            .as_str()
+            .unwrap()
+            .contains("ttyd-transfer-token"));
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = transfer_root("token-off");
+        let config = transfer_config(&dir, |config| config.http_transfer = false);
+        let (addr, shutdown) = spawn_server(config).await;
+        let response = http_request(addr, http_get(addr, "/token", None)).await;
+        let payload: serde_json::Value = serde_json::from_str(response_body(&response)).unwrap();
+        assert_eq!(payload["httpTransfer"], false);
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_endpoints_follow_the_base_path() {
+        let dir = transfer_root("base-path");
+        let config = transfer_config(&dir, |config| {
+            config.writable = false;
+            config.endpoints = Endpoints::from_base_path(Some("/mounted/here"));
+        });
+        let (addr, shutdown) = spawn_server(config).await;
+
+        let prefixed = transfer_request(
+            addr,
+            "POST",
+            "/mounted/here/sessions/deadbeef/files?name=a.txt",
+            TRANSFER_HEADERS,
+            b"x",
+        )
+        .await;
+        assert!(
+            prefixed.starts_with("HTTP/1.1 403"),
+            "response was {prefixed}"
+        );
+
+        let unprefixed = transfer_request(
+            addr,
+            "POST",
+            "/sessions/deadbeef/files?name=a.txt",
+            TRANSFER_HEADERS,
+            b"x",
+        )
+        .await;
+        assert!(
+            unprefixed.starts_with("HTTP/1.1 404"),
+            "response was {unprefixed}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_transfer_root_blocks_paths_outside_the_whitelist() {
+        let root = transfer_root("root-guard");
+        let outside = transfer_root("root-guard-outside");
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        let config = transfer_config(&root, |config| {
+            config.http_transfer_root = Some(root.canonicalize().unwrap());
+        });
+        let (addr, shutdown, _socket, id) = start_transfer_session(config).await;
+
+        let download = transfer_request(
+            addr,
+            "GET",
+            &download_url(&id, &outside.join("secret.txt")),
+            TRANSFER_HEADERS,
+            &[],
+        )
+        .await;
+        assert!(
+            download.starts_with("HTTP/1.1 403"),
+            "response was {download}"
+        );
+
+        let directory = transfer_request(
+            addr,
+            "GET",
+            &download_url(&id, &root),
+            TRANSFER_HEADERS,
+            &[],
+        )
+        .await;
+        assert!(
+            directory.starts_with("HTTP/1.1 403"),
+            "directories must not be downloadable: {directory}"
+        );
+
+        shutdown.cancel();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

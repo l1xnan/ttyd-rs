@@ -130,6 +130,34 @@
   gap: 8px;
 }
 
+.workspace-transfer {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #3b423c;
+  border-radius: 5px;
+  background: #222823;
+  color: #aab3ab;
+  cursor: pointer;
+  font:
+    600 10px/1 ui-monospace,
+    'SFMono-Regular',
+    Consolas,
+    'Liberation Mono',
+    monospace;
+  letter-spacing: 0.06em;
+}
+
+.workspace-transfer:hover {
+  border-color: #d6a55c;
+  color: #e3e7e1;
+}
+
+.workspace-transfer:focus-visible {
+  outline: 2px solid #d6a55c;
+  outline-offset: 2px;
+}
+
 .workspace-end-replay {
   flex: 0 0 auto;
   height: 28px;

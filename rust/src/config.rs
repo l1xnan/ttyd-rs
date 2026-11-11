@@ -12,6 +12,10 @@ pub struct Endpoints {
     pub logout: String,
     pub sessions: String,
     pub parent: String,
+    /// `POST` uploads one file (raw body).
+    pub files_upload: String,
+    /// `GET` downloads any path (`?path=`, absolute or relative to the destination).
+    pub file_download: String,
 }
 
 impl Endpoints {
@@ -26,6 +30,8 @@ impl Endpoints {
                 logout: "/logout".to_owned(),
                 sessions: "/sessions".to_owned(),
                 parent: String::new(),
+                files_upload: "/sessions/{id}/files".to_owned(),
+                file_download: "/sessions/{id}/download".to_owned(),
             };
         }
 
@@ -37,6 +43,8 @@ impl Endpoints {
             logout: format!("{base}/logout"),
             sessions: format!("{base}/sessions"),
             parent: base.to_owned(),
+            files_upload: format!("{base}/sessions/{{id}}/files"),
+            file_download: format!("{base}/sessions/{{id}}/download"),
         }
     }
 
@@ -93,6 +101,23 @@ pub struct Config {
     pub prefs_json: String,
     pub command: Vec<OsString>,
     pub command_string: String,
+    /// Enable the HTTP file transfer endpoints. Disabled by default; `-W` is
+    /// additionally required for every request.
+    pub http_transfer: bool,
+    /// Optional whitelist: `Some(dir)` restricts all file operations to that
+    /// canonicalized tree. `None` allows any path the server user can access.
+    pub http_transfer_root: Option<PathBuf>,
+    /// Upload destination when the shell cwd cannot be followed (Windows,
+    /// macOS, probe failure, or `--no-http-follow-cwd`). Falls back to `-w` /
+    /// the process cwd when unset.
+    pub http_transfer_dir: Option<PathBuf>,
+    /// Maximum size of a single uploaded file, in bytes.
+    pub http_transfer_max_upload: usize,
+    /// Approximate per-directory quota, in bytes. `0` disables the check.
+    pub http_transfer_session_quota: usize,
+    /// Follow the shell cwd via `/proc/<pid>/cwd` on Linux. When false (or
+    /// unsupported) uploads use `http_transfer_dir` / `-w` / the process cwd.
+    pub http_transfer_follow_cwd: bool,
 }
 
 impl Config {
@@ -207,6 +232,8 @@ mod tests {
         assert_eq!(endpoints.session("abc"), "/sessions/abc");
         assert_eq!(endpoints.cookie_path(), "/");
         assert!(endpoints.parent.is_empty());
+        assert_eq!(endpoints.files_upload, "/sessions/{id}/files");
+        assert_eq!(endpoints.file_download, "/sessions/{id}/download");
     }
 
     #[test]
@@ -221,6 +248,11 @@ mod tests {
         assert_eq!(endpoints.session("abc"), "/mounted/here/sessions/abc");
         assert_eq!(endpoints.cookie_path(), "/mounted/here");
         assert_eq!(endpoints.parent, "/mounted/here");
+        assert_eq!(endpoints.files_upload, "/mounted/here/sessions/{id}/files");
+        assert_eq!(
+            endpoints.file_download,
+            "/mounted/here/sessions/{id}/download"
+        );
     }
 
     #[test]

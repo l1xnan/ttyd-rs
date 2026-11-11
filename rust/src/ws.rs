@@ -161,7 +161,7 @@ fn parse_url_args(uri: &Uri) -> Vec<String> {
         .collect()
 }
 
-fn check_origin(headers: &HeaderMap) -> bool {
+pub(crate) fn check_origin(headers: &HeaderMap) -> bool {
     let origin = match headers.get(ORIGIN).and_then(|value| value.to_str().ok()) {
         Some(origin) => origin,
         None => return false,

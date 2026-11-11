@@ -16,6 +16,7 @@ ttyd 是一个简单的命令行工具，可通过 Web 共享终端。
 - 基于 [Tokio](https://tokio.rs) 和 [Axum](https://github.com/tokio-rs/axum) 的 Rust 后端，以及单文件 [xterm.js](https://xtermjs.org) 前端
 - 功能完整的终端，支持 [CJK](https://en.wikipedia.org/wiki/CJK_characters) 和输入法（IME）
 - 支持 [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM)（[lrzsz](https://ohse.de/uwe/software/lrzsz.html)）/ [trzsz](https://trzsz.github.io) 文件传输，见[文件传输与 Sixel](#文件传输与-sixel)
+- 内置 HTTP 文件传输（标签栏「Upload」「Download」按钮），远端**无需**安装 `lrzsz` 或 `trzsz`，见[文件传输与 Sixel](#文件传输与-sixel)
 - 支持 [Sixel](https://en.wikipedia.org/wiki/Sixel) 图像输出（[img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix)），见[文件传输与 Sixel](#文件传输与-sixel)
 - 基于 [rustls](https://github.com/rustls/rustls) 的 TLS 和双向 TLS 支持
 - 可运行任意自定义命令并传递参数
@@ -119,6 +120,12 @@ cargo build --release --manifest-path rust/Cargo.toml
         --session-timeout      分离后保留会话的秒数（默认：30，0 表示禁用会话保持）
         --session-buffer-size  用于会话回放的输出缓冲字节数（默认：4194304）
         --history-limit        保留多少个已结束会话用于只读回放（默认：20，0 表示禁用历史）
+        --http-transfer     启用 HTTP 文件传输（需要 -W）
+        --http-transfer-dir           无法跟随 shell cwd 时的上传落点（默认：-w / 进程 cwd）
+        --http-transfer-root          可选白名单：把所有文件操作限制在该目录内
+        --http-transfer-max-upload    单个上传文件的最大字节数（默认：67108864）
+        --http-transfer-session-quota 每目录近似配额（字节），0 表示不限制（默认：268435456）
+        --no-http-follow-cwd  始终使用 --http-transfer-dir，不跟随 shell 的 cwd
     -6, --ipv6              启用 IPv6 支持
     -S, --ssl               启用 SSL
     -C, --ssl-cert          SSL 证书文件路径
@@ -170,11 +177,34 @@ ttyd -c user:pass bash
 - `DELETE /sessions/{id}` 会终止并归档正在运行的会话，或删除一条历史记录。配置了认证时会话必须属于当前用户，否则返回 `403`。成功返回 `204`，ID 不存在时返回 `404`。
 - API 中的时间戳是 Unix 毫秒时间戳（`endedAt`）。被终止或过期的会话记录退出码 `-1`。
 
+启用 `--http-transfer -W` 后，同一基础路径下还会多出两个路由（都要求 `X-TTYD-Transfer: 1` 头，并绑定会话 ID 与所属用户）：
+
+- `POST /sessions/{id}/files?name=<文件>` 以 `application/octet-stream` 原始请求体上传单个文件。同名返回 `409`，超过 `--http-transfer-max-upload` 返回 `413`。
+- `GET /sessions/{id}/download?path=<路径>` 下载绝对路径或相对落点的任意文件。符号链接和目录会被拒绝；超出 `--http-transfer-root` 返回 `403`。
+
+未加 `--http-transfer` 时这些路由返回 `404`；未加 `-W` 时返回 `403`。
+
 ## 文件传输与 Sixel
 
 ZMODEM、trzsz 和 Sixel 默认关闭，用 `-t` 客户端选项打开。文件传输，以及 `img2sixel` / `lsix` 用来判断终端是否支持 Sixel 的探测应答，都要从浏览器写回 PTY，所以下面的示例都带 `-W`。只读会话仍然可以显示已经输出的 Sixel，但探测应答发不出去时，这两个工具会认为终端不支持 Sixel。
 
-对应的命令需要装在**运行 ttyd 所启动的那个程序**所在的环境里。装好之后可以按下面的命令手工试一次。持续集成不会安装 `lrzsz`、`trzsz` 或 `img2sixel`。
+对应的命令需要装在**运行 ttyd 所启动的那个程序**所在的环境里。装好之后可以按下面的命令手工试一次。持续集成不会安装 `lrzsz`、`trzsz` 或 `img2sixel`。下面的 HTTP 文件传输是例外：它内置于 ttyd，远端不需要安装任何东西。
+
+### HTTP 文件传输
+
+这条通路**不依赖远端任何程序**——不需要 `trz`、`tsz`、`rz`、`sz`，也不需要辅助脚本，普通 HTTP 下即可使用。默认关闭，并且同样需要 `-W`：
+
+```sh
+ttyd --http-transfer -W bash
+ttyd --http-transfer -W --http-transfer-dir D:/uploads bash   # Windows / macOS
+```
+
+- **上传**：点标签栏「Upload」按钮，或把文件拖进终端。对话框会先显示上传落点，再弹出系统文件选择框，上传过程带进度条。
+- **上传落点**：Linux 下通过 `/proc/<pid>/cwd` 跟随 shell 当前目录，`cd` 会改变落点；无法跟随时（Windows、macOS、ConPTY、探测失败或加了 `--no-http-follow-cwd`）使用 `--http-transfer-dir <目录>`；未配置则用 `-w` / 进程 cwd。落点会在上传前显示。
+- **下载**：点标签栏「Download」按钮，输入服务器文件路径（绝对路径，或相对上传落点的路径），点 Download 即可。
+- `--http-transfer-root <目录>` 是可选白名单，同时约束上传和下载，越界返回 `403`。不加时，ttyd 进程能读的任意文件都可下载；不受信任的网络请加 `-c` 或 `-H`。
+- 同名返回 `409`，超过 `--http-transfer-max-upload` 返回 `413`。不覆盖、不断点续传、不并发分块。
+- 请求绑定运行中的会话 ID 和所属用户。终端输入不会被拦截，`ttyd-*` 不是命令。
 
 ### ZMODEM
 

@@ -16,6 +16,7 @@ ttyd is a simple command-line tool for sharing terminal over the web.
 - Rust backend built on [Tokio](https://tokio.rs) and [Axum](https://github.com/tokio-rs/axum), with a single-file [xterm.js](https://xtermjs.org) frontend
 - Fully-featured terminal with [CJK](https://en.wikipedia.org/wiki/CJK_characters) and IME support
 - [ZMODEM](https://en.wikipedia.org/wiki/ZMODEM) ([lrzsz](https://ohse.de/uwe/software/lrzsz.html)) / [trzsz](https://trzsz.github.io) file transfer support, see [File transfer and Sixel](#file-transfer-and-sixel)
+- HTTP file transfer (Upload / Download buttons) that needs **no** `lrzsz` or `trzsz` installed on the remote host, see [File transfer and Sixel](#file-transfer-and-sixel)
 - [Sixel](https://en.wikipedia.org/wiki/Sixel) image output support ([img2sixel](https://saitoha.github.io/libsixel) / [lsix](https://github.com/hackerb9/lsix)), see [File transfer and Sixel](#file-transfer-and-sixel)
 - TLS and mutual TLS support based on [rustls](https://github.com/rustls/rustls)
 - Run any custom command with options
@@ -127,6 +128,12 @@ OPTIONS:
         --session-timeout      Seconds to keep a detached session alive (default: 30, 0 disables persistence)
         --session-buffer-size  Bytes of output retained for session replay (default: 4194304)
         --history-limit        Ended sessions to keep for read-only replay (default: 20, 0 disables history)
+        --http-transfer     Enable HTTP file transfer (requires -W)
+        --http-transfer-dir           Upload destination when the shell cwd cannot be followed (default: -w / process cwd)
+        --http-transfer-root          Restrict all file operations to this directory (optional whitelist)
+        --http-transfer-max-upload    Maximum bytes per uploaded file (default: 67108864)
+        --http-transfer-session-quota Approximate per-directory quota in bytes, 0 disables (default: 268435456)
+        --no-http-follow-cwd  Always use --http-transfer-dir instead of following the shell cwd
     -6, --ipv6              Enable IPv6 support
     -S, --ssl               Enable SSL
     -C, --ssl-cert          SSL certificate file path
@@ -240,6 +247,20 @@ Session API routes are served under the base path set by `-b`:
 - Timestamps are Unix epoch milliseconds (`endedAt`). Killed or expired
   sessions record exit code `-1`.
 
+When `--http-transfer -W` is set, two more routes are added under the same
+base path (both require the `X-TTYD-Transfer: 1` header and are bound to the
+session id and its owner):
+
+- `POST /sessions/{id}/files?name=<file>` uploads one file as a raw
+  `application/octet-stream` body. An existing name returns `409`, a body over
+  `--http-transfer-max-upload` returns `413`.
+- `GET /sessions/{id}/download?path=<path>` downloads a file at any absolute
+  or destination-relative path. Symlinks and directories are rejected; leaving
+  `--http-transfer-root` returns `403`.
+
+Without `--http-transfer` these routes return `404`; without `-W` they return
+`403`.
+
 ## File transfer and Sixel
 
 ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on.
@@ -251,7 +272,37 @@ reply as "no Sixel support".
 
 Install each program in the environment of the command ttyd starts. After it
 is installed, try the commands below by hand. Continuous integration does not
-install `lrzsz`, `trzsz`, or `img2sixel`.
+install `lrzsz`, `trzsz`, or `img2sixel`. The HTTP file transfer path below is
+the exception: it is built into ttyd and needs nothing installed remotely.
+
+### HTTP file transfer
+
+This path needs **nothing on the remote host** — no `trz`, `tsz`, `rz`, `sz`
+and no helper scripts — and it works over plain HTTP. It is off by default and
+also requires `-W`:
+
+```sh
+ttyd --http-transfer -W bash
+ttyd --http-transfer -W --http-transfer-dir D:/uploads bash   # Windows / macOS
+```
+
+- **Upload**: click the tab bar "Upload" button, or drop files onto the
+  terminal. A dialog shows where the files will land, then the native file
+  picker opens; uploads stream with a progress bar.
+- **Upload destination**: on Linux ttyd follows the shell's current directory
+  through `/proc/<pid>/cwd`, so `cd` changes where files land. When that is
+  unavailable (Windows, macOS, ConPTY, probe failure, or
+  `--no-http-follow-cwd`) it uses `--http-transfer-dir <dir>`; if unset, `-w` /
+  the process cwd. The destination is shown before the upload.
+- **Download**: click the tab bar "Download" button, type a server file path
+  (absolute, or relative to the upload destination) and press Download.
+- `--http-transfer-root <dir>` is an optional whitelist for both directions;
+  leaving it returns `403`. Without it any file readable by the ttyd process
+  can be downloaded — use `-c` or `-H` on an untrusted network.
+- Existing names return `409`; bodies over `--http-transfer-max-upload` return
+  `413`. There is no overwrite, no resume and no chunked concurrency.
+- Requests are bound to the live session id and its owner. Terminal input is
+  never intercepted: `ttyd-*` is not a command.
 
 ### ZMODEM
 

@@ -61,6 +61,25 @@
   padding: calc(0.375em - 1px) 1em;
 }
 
+/* Dark variant for panels that follow the workspace palette. */
+.modal--dark .modal-content .box {
+  box-sizing: border-box;
+  border: 1px solid #333a34;
+  border-radius: 6px;
+  background-color: #1d211e;
+  color: #e3e7e1;
+}
+
+.modal--dark .modal-content .modal-cancel {
+  margin-top: 8px;
+  color: #aab3ab;
+}
+
+.modal--dark .modal-content .modal-cancel:hover,
+.modal--dark .modal-content .modal-cancel:focus-visible {
+  color: #e3e7e1;
+}
+
 .modal-content .file-cta {
   cursor: pointer;
   background-color: #f5f5f5;

@@ -12,6 +12,8 @@ export interface TerminalHandle {
     fit(): void;
     focus(): void;
     hasLiveSession(): boolean;
+    /** Live PTY session id, used by the HTTP transfer panel. */
+    getSessionId(): string | undefined;
     dispose(): void;
 }
 
@@ -38,6 +40,9 @@ export interface TerminalProps {
     onRequestClose?: (tabId: string) => void;
     onLeaveAlertDisabled?: () => void;
     onConnectionFailed?: (tabId: string, message: string) => void;
+    /** Server-authoritative switch from `/token`. */
+    transferEnabled: boolean;
+    onTransferRequest?: (tabId: string, files: File[]) => void;
 }
 
 interface State {
@@ -59,6 +64,7 @@ export class Terminal extends Component<TerminalProps, State> {
         fit: () => this.xterm.fit(),
         focus: () => this.xterm.focus(),
         hasLiveSession: () => this.xterm.hasLiveSession(),
+        getSessionId: () => this.xterm.getSessionId(),
         dispose: () => this.xterm.dispose(),
     };
 
@@ -84,6 +90,8 @@ export class Terminal extends Component<TerminalProps, State> {
                 onLeaveAlertDisabled: () => this.props.onLeaveAlertDisabled?.(),
                 onRequestClose: () => this.props.onRequestClose?.(this.props.tabId),
                 onConnectionFailed: message => this.props.onConnectionFailed?.(this.props.tabId, message),
+                transferEnabled: props.transferEnabled,
+                onTransferRequest: files => this.props.onTransferRequest?.(this.props.tabId, files),
             },
             this.showModal
         );

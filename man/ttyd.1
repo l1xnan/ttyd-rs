@@ -140,6 +140,30 @@ Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, -s does not deli
       Ended sessions to keep for read-only replay (default: 20, 0 disables history)
 
 .PP
+--http-transfer
+      Enable the HTTP file transfer endpoints. Requires -W.
+
+.PP
+--http-transfer-dir <dir>
+      Upload destination when the shell cwd cannot be followed (Windows, macOS, probe failure, or --no-http-follow-cwd). Defaults to -w / the process cwd.
+
+.PP
+--http-transfer-root <dir>
+      Restrict every file operation to this canonicalized directory tree. By default any shell cwd may be followed.
+
+.PP
+--http-transfer-max-upload <bytes>
+      Maximum size of one uploaded file (default: 67108864).
+
+.PP
+--http-transfer-session-quota <bytes>
+      Approximate per-directory quota; 0 disables the check (default: 268435456).
+
+.PP
+--no-http-follow-cwd
+      Always use --http-transfer-dir instead of following the shell cwd.
+
+.PP
 -6, --ipv6
       Enable IPv6 support
 
@@ -216,6 +240,8 @@ ttyd has a mechanism to pass server side command-line arguments to the browser p
 \fB\fC-t unicodeVersion=11\fR: set xterm unicode support level (default: 11, use 6 to disable unicode addon)
 .IP \(bu 2
 \fB\fC-t trzszDragInitTimeout=3000\fR: set the timeout in milliseconds for initializing drag and drop files to upload. (default: 3000)
+.IP \(bu 2
+.IP \(bu 2
 
 .RE
 
@@ -287,7 +313,30 @@ Timestamps are Unix epoch milliseconds (\fB\fCendedAt\fR). Killed or expired ses
 
 .SH FILE TRANSFER AND SIXEL
 .PP
-ZMODEM, trzsz, and Sixel are off until a \fB\fC-t\fR client option turns them on. File transfer and the probe reply used by \fB\fCimg2sixel\fR / \fB\fClsix\fR both have to be written back to the PTY, so these examples include \fB\fC-W\fR. Install each program in the environment of the command ttyd starts, then try the commands by hand.
+ZMODEM, trzsz, and Sixel are off until a \fB\fC-t\fR client option turns them on. File transfer and the probe reply used by \fB\fCimg2sixel\fR / \fB\fClsix\fR both have to be written back to the PTY, so these examples include \fB\fC-W\fR. Install each program in the environment of the command ttyd starts, then try the commands by hand. The HTTP file transfer path below is built into ttyd and needs nothing installed remotely.
+
+.SS HTTP file transfer
+.PP
+Enable it with \fB\fC--http-transfer -W\fR; it is off by default and works over plain HTTP:
+
+.PP
+.RS
+
+.nf
+ttyd --http-transfer -W bash
+ttyd --http-transfer -W --http-transfer-dir /srv/uploads bash
+
+.fi
+.RE
+
+.PP
+\fBUpload\fR: click the tab bar "Upload" button or drop files onto the terminal. The dialog shows the destination before the native file picker opens. On Linux the destination follows the shell cwd through \fB\fC/proc/<pid>/cwd\fR; when that is unavailable (Windows, macOS, ConPTY, probe failure, or \fB\fC--no-http-follow-cwd\fR) it uses \fB\fC--http-transfer-dir <dir>\fR, then \fB\fC-w\fR / the process cwd.
+
+.PP
+\fBDownload\fR: click the tab bar "Download" button, type a server file path (absolute, or relative to the destination) and press Download. Terminal input is never intercepted \(em \fB\fCttyd-*\fR is not a command.
+
+.PP
+Two routes are served under the base path set by \fB\fC-b\fR, both requiring \fB\fCX-TTYD-Transfer: 1\fR and bound to a live session id and its owner: \fB\fCPOST /sessions/{id}/files?name=<file>\fR uploads a raw \fB\fCapplication/octet-stream\fR body (\fB\fC409\fR on an existing name, \fB\fC413\fR over the size limit), and \fB\fCGET /sessions/{id}/download?path=<path>\fR downloads any file. Symlinks, directories and paths outside \fB\fC--http-transfer-root\fR are rejected (\fB\fC403\fR). Without \fB\fC--http-transfer\fR the routes return \fB\fC404\fR; without \fB\fC-W\fR they return \fB\fC403\fR. Existing names are never overwritten; there is no resume or chunked concurrency. Without a root, any file readable by the ttyd process can be downloaded \(em use authentication on untrusted networks.
 
 .PP
 ZMODEM requires lrzsz (\fB\fCsz\fR and \fB\fCrz\fR):
@@ -318,6 +367,12 @@ ttyd -W -t enableTrzsz=true bash
 
 .PP
 \fB\fCtrz\fR uploads from the browser and \fB\fCtsz file\fR downloads a file. Dropping files onto the terminal also uploads them; ttyd starts \fB\fCtrz\fR and waits \fB\fC-t trzszDragInitTimeout\fR milliseconds (default 3000) for the server. ZMODEM and trzsz can both be enabled. ZMODEM still works when no trzsz transfer is in progress.
+
+.PP
+The File System Access API used by trzsz only exists on HTTPS or \fB\fClocalhost\fR. On a plain HTTP address, such as a LAN IP, ttyd substitutes a native file picker: uploads still work, directory picks use \fB\fCwebkitdirectory\fR, and \fB\fCtsz\fR downloads every file separately instead of writing into a chosen folder. Use \fB\fC-S -C <cert> -K <key>\fR or an HTTPS reverse proxy for the full behaviour.
+
+.PP
+Input frames are capped at 256 KiB by the server, so the browser limits a trzsz data chunk to 96 KiB before encoding. Raising \fB\fC-f\fR / \fB\fC--srv-buf-size\fR does not change that limit; it only controls how much the PTY delivers per read.
 
 .PP
 Sixel, for img2sixel and lsix:

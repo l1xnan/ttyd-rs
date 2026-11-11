@@ -9,6 +9,7 @@ import { ImageAddon } from '@xterm/addon-image';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { OverlayAddon } from './addons/overlay';
 import { ZmodemAddon } from './addons/zmodem';
+import { TransferController } from './addons/http-transfer/controller';
 import { buildHandshake, parseReadonlyFrame } from './handshake';
 import { bypassesTransferFilter, REPLAY_OUTPUT } from './frames';
 import {
@@ -78,6 +79,9 @@ export interface XtermOptions {
     onLeaveAlertDisabled?: () => void;
     onRequestClose?: () => void;
     onConnectionFailed?: (message: string) => void;
+    /** Server-authoritative; never derived from client options or the URL. */
+    transferEnabled?: boolean;
+    onTransferRequest?: (files: File[]) => void;
 }
 
 const DEFAULT_TITLE = 'ttyd - Terminal';
@@ -112,6 +116,7 @@ export class Xterm {
     private webLinksAddon = new WebLinksAddon();
     private webglAddon?: WebglAddon;
     private zmodemAddon?: ZmodemAddon;
+    private transferController?: TransferController;
     private sixelInstalled = false;
 
     private socket?: WebSocket;
@@ -159,6 +164,9 @@ export class Xterm {
         this.disposables.length = 0;
         this.socketDisposables.length = 0;
         this.zmodemAddon = undefined;
+        // `reset()` disposes everything registered through `register()`, which
+        // includes the transfer controller and its DOM listeners.
+        this.transferController = undefined;
         this.sixelInstalled = false;
         this.writeFunc = data => this.writeData(new Uint8Array(data));
     }
@@ -219,6 +227,11 @@ export class Xterm {
     /** A live, writable PTY connection (history replays do not count). */
     public hasLiveSession(): boolean {
         return !this.readOnly && !this.attachOnly && this.socket?.readyState === WebSocket.OPEN;
+    }
+
+    /** Live PTY session id needed by the HTTP file transfer endpoints. */
+    public getSessionId(): string | undefined {
+        return this.sessionId;
     }
 
     /** The one place allowed to write document.title; hidden tabs only cache it. */
@@ -700,6 +713,20 @@ export class Xterm {
     @bind
     private applyPreferences(prefs: Preferences) {
         const { terminal, register } = this;
+        if (this.options.transferEnabled && !this.transferController && terminal.element) {
+            this.transferController = this.register(
+                new TransferController({
+                    enabled: true,
+                    canWrite: () =>
+                        !this.readOnly &&
+                        !this.attachOnly &&
+                        this.socket?.readyState === WebSocket.OPEN &&
+                        !terminal.options.disableStdin,
+                    onRequest: files => this.options.onTransferRequest?.(files),
+                    element: terminal.element,
+                })
+            );
+        }
         if ((prefs.enableZmodem || prefs.enableTrzsz) && !this.zmodemAddon) {
             this.zmodemAddon = new ZmodemAddon({
                 zmodem: prefs.enableZmodem,

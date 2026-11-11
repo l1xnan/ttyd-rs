@@ -398,6 +398,12 @@ mod tests {
             prefs_json: "{}".to_owned(),
             command: idle_command(),
             command_string: "sleep".to_owned(),
+            http_transfer: false,
+            http_transfer_root: None,
+            http_transfer_dir: None,
+            http_transfer_max_upload: 64 * 1024 * 1024,
+            http_transfer_session_quota: 256 * 1024 * 1024,
+            http_transfer_follow_cwd: true,
         }
     }
 

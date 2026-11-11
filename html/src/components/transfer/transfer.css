@@ -1,0 +1,165 @@
+/* The Modal owns the width and the scrolling; never force our own size here. */
+.transfer-panel {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  color: #e3e7e1;
+  font:
+    12px/1.5 ui-monospace,
+    'SFMono-Regular',
+    Consolas,
+    'Liberation Mono',
+    monospace;
+}
+
+.transfer-title {
+  margin: 0 0 12px;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.transfer-section {
+  min-width: 0;
+}
+
+.transfer-location {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #333a34;
+  border-radius: 5px;
+  background: #1d211e;
+}
+
+.transfer-label {
+  color: #8d978f;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.transfer-cwd {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 3px;
+  background: #151815;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  color: #e3e7e1;
+}
+
+.transfer-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #3b423c;
+  border-radius: 4px;
+  background: #151815;
+  color: #e3e7e1;
+  font: inherit;
+  font-size: 11px;
+}
+
+.transfer-input::placeholder {
+  color: #667068;
+}
+
+.transfer-input:focus-visible {
+  outline: 2px solid #d6a55c;
+  outline-offset: 1px;
+}
+
+.transfer-hint {
+  margin: 8px 0 0;
+  color: #8d978f;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.transfer-button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #5a655c;
+  border-radius: 5px;
+  background: #222823;
+  color: #e3e7e1;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  transition: border-color 150ms ease;
+}
+
+.transfer-button:hover:not(:disabled) {
+  border-color: #d6a55c;
+}
+
+.transfer-button:focus-visible {
+  outline: 2px solid #d6a55c;
+  outline-offset: 2px;
+}
+
+.transfer-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.transfer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+  color: #aab3ab;
+  font-size: 11px;
+}
+
+.transfer-progress progress {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 6px;
+  accent-color: #d6a55c;
+}
+
+.transfer-error,
+.transfer-notice {
+  margin: 10px 0;
+  padding: 8px 10px;
+  border-left: 2px solid;
+  border-radius: 4px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.transfer-error {
+  border-color: #e58b78;
+  background: #33231f;
+  color: #f0b5a6;
+}
+
+.transfer-notice {
+  border-color: #7fb782;
+  background: #1e2b21;
+  color: #c2e2bd;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transfer-button {
+    transition: none;
+  }
+}

@@ -2,6 +2,7 @@ import { bind } from 'decko';
 import { Component, h } from 'preact';
 import type { ITerminalOptions } from '@xterm/xterm';
 import { Terminal, type TerminalHandle } from '../terminal';
+import { TransferPanel, type TransferMode } from '../transfer';
 import { SessionPanel, type DeletedSessionKind } from '../sessions';
 import type { SessionSummary } from '../sessions/sessions';
 import type { ClientOptions, FlowControl } from '../terminal/xterm';
@@ -38,6 +39,11 @@ export interface WorkspaceProps {
     termOptions: ITerminalOptions;
     flowControl: FlowControl;
     sessionTimeout: number;
+    /** Authoritative server switch from `/token`. */
+    transferEnabled: boolean;
+    transferMaxUpload: number;
+    transferDir?: string | null;
+    transferFollowCwd?: boolean;
     loginEnabled: boolean;
     loggingOut: boolean;
     error: string;
@@ -49,6 +55,12 @@ export class Workspace extends Component<WorkspaceProps, WorkspaceState> {
     /** Authoritative state; Preact's `this.state` can lag behind a batch. */
     private workspace: WorkspaceState;
     private handles = new Map<string, TerminalHandle>();
+    private transfer: {
+        open: boolean;
+        mode: TransferMode;
+        tabId?: string;
+        droppedFiles?: File[];
+    } = { open: false, mode: 'upload' };
     private storageKey = workspaceStorageKey(window.location.pathname);
     private storageAvailable = true;
     private saveTimer?: number;
@@ -309,6 +321,29 @@ export class Workspace extends Component<WorkspaceProps, WorkspaceState> {
         this.apply(next);
     }
 
+    private transferSessionId(): string | undefined {
+        const tabId = this.transfer.tabId ?? this.workspace.activeId;
+        const tab = this.workspace.tabs.find(item => item.id === tabId);
+        return this.handles.get(tabId)?.getSessionId() ?? tab?.sessionId;
+    }
+
+    @bind
+    private openTransfer(tabId: string, mode: TransferMode, files?: File[]) {
+        this.transfer = { open: true, mode, tabId, droppedFiles: files };
+        this.forceUpdate();
+    }
+
+    @bind
+    private closeTransfer() {
+        this.transfer = { ...this.transfer, open: false, droppedFiles: undefined };
+        this.forceUpdate();
+    }
+
+    @bind
+    private onTransferRequest(tabId: string, files: File[]) {
+        this.openTransfer(tabId, 'upload', files);
+    }
+
     render(props: WorkspaceProps, state: WorkspaceState) {
         const { tabs, activeId } = state;
         const activeTab = tabs.find(tab => tab.id === activeId);
@@ -353,6 +388,28 @@ export class Workspace extends Component<WorkspaceProps, WorkspaceState> {
                         +
                     </button>
                     <div class="workspace-tabbar-actions">
+                        {props.transferEnabled && (
+                            <button
+                                class="workspace-transfer"
+                                type="button"
+                                title="Upload files over HTTP"
+                                aria-label="Upload files"
+                                onClick={() => this.openTransfer(activeId, 'upload')}
+                            >
+                                ↑ Upload
+                            </button>
+                        )}
+                        {props.transferEnabled && (
+                            <button
+                                class="workspace-transfer"
+                                type="button"
+                                title="Download a file by its server path"
+                                aria-label="Download file"
+                                onClick={() => this.openTransfer(activeId, 'download')}
+                            >
+                                ↓ Download
+                            </button>
+                        )}
                         {activeTab?.kind === 'replay' && (
                             <button class="workspace-end-replay" type="button" onClick={() => this.close(activeTab.id)}>
                                 End replay
@@ -419,6 +476,8 @@ export class Workspace extends Component<WorkspaceProps, WorkspaceState> {
                                 onRequestClose={this.onRequestClose}
                                 onLeaveAlertDisabled={this.onLeaveAlertDisabled}
                                 onConnectionFailed={this.onConnectionFailed}
+                                transferEnabled={props.transferEnabled}
+                                onTransferRequest={this.onTransferRequest}
                             />
                         </div>
                     ))}
@@ -428,6 +487,20 @@ export class Workspace extends Component<WorkspaceProps, WorkspaceState> {
                     <div class="logout-error" role="alert">
                         {props.error}
                     </div>
+                )}
+
+                {props.transferEnabled && (
+                    <TransferPanel
+                        open={this.transfer.open}
+                        mode={this.transfer.mode}
+                        sessionsUrl={props.sessionsUrl}
+                        sessionId={this.transferSessionId()}
+                        droppedFiles={this.transfer.droppedFiles}
+                        maxUpload={props.transferMaxUpload}
+                        transferDir={props.transferDir}
+                        followCwd={props.transferFollowCwd !== false}
+                        onClose={this.closeTransfer}
+                    />
                 )}
             </div>
         );

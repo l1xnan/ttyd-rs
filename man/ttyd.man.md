@@ -102,6 +102,24 @@ ttyd 1 "September 2016" ttyd "User Manual"
   --history-limit <count>
       Ended sessions to keep for read-only replay (default: 20, 0 disables history)
 
+  --http-transfer
+      Enable the HTTP file transfer endpoints. Requires `-W`.
+
+  --http-transfer-dir <dir>
+      Upload destination when the shell cwd cannot be followed (Windows, macOS, probe failure, or `--no-http-follow-cwd`). Defaults to `-w` / the process cwd.
+
+  --http-transfer-root <dir>
+      Restrict every file operation to this canonicalized directory tree. By default any shell cwd may be followed.
+
+  --http-transfer-max-upload <bytes>
+      Maximum size of one uploaded file (default: 67108864).
+
+  --http-transfer-session-quota <bytes>
+      Approximate per-directory quota; `0` disables the check (default: 268435456).
+
+  --no-http-follow-cwd
+      Always use --http-transfer-dir instead of following the shell cwd.
+
   -6, --ipv6
       Enable IPv6 support
 
@@ -203,8 +221,24 @@ ttyd -c user:pass bash
 
   Timestamps are Unix epoch milliseconds (`endedAt`). Killed or expired sessions record exit code `-1`. The browser session panel shows Running and History entries and only appears when `GET /sessions` is available, that is when authentication is configured.
 
+  With `--http-transfer -W` two more routes are served under the same base path (`POST /sessions/{id}/files?name=` and `GET /sessions/{id}/download?path=`); see **HTTP file transfer** below.
+
 # FILE TRANSFER AND SIXEL
-  ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on. File transfer and the probe reply used by `img2sixel` / `lsix` both have to be written back to the PTY, so these examples include `-W`. Install each program in the environment of the command ttyd starts, then try the commands by hand.
+  ZMODEM, trzsz, and Sixel are off until a `-t` client option turns them on. File transfer and the probe reply used by `img2sixel` / `lsix` both have to be written back to the PTY, so these examples include `-W`. Install each program in the environment of the command ttyd starts, then try the commands by hand. The HTTP file transfer path below is built into ttyd and needs nothing installed remotely.
+
+## HTTP file transfer
+  Enable it with `--http-transfer -W`; it is off by default and works over plain HTTP:
+
+```bash
+ttyd --http-transfer -W bash
+ttyd --http-transfer -W --http-transfer-dir /srv/uploads bash
+```
+
+  **Upload**: click the tab bar "Upload" button or drop files onto the terminal. The dialog shows the destination before the native file picker opens. On Linux the destination follows the shell cwd through `/proc/<pid>/cwd`; when that is unavailable (Windows, macOS, ConPTY, probe failure, or `--no-http-follow-cwd`) it uses `--http-transfer-dir <dir>`, then `-w` / the process cwd.
+
+  **Download**: click the tab bar "Download" button, type a server file path (absolute, or relative to the destination) and press Download. Terminal input is never intercepted — `ttyd-*` is not a command.
+
+  Two routes are served under the base path set by `-b`, both requiring `X-TTYD-Transfer: 1` and bound to a live session id and its owner: `POST /sessions/{id}/files?name=<file>` uploads a raw `application/octet-stream` body (`409` on an existing name, `413` over the size limit); `GET /sessions/{id}/download?path=<path>` downloads any file. Symlinks, directories and paths outside `--http-transfer-root` are rejected (`403`). Without `--http-transfer` the routes return `404`; without `-W` they return `403`. Existing names are never overwritten; there is no resume or chunked concurrency. Without a root, any file readable by the ttyd process can be downloaded — use authentication on untrusted networks.
 
   ZMODEM requires [lrzsz](https://ohse.de/uwe/software/lrzsz.html) (`sz` and `rz`):
 

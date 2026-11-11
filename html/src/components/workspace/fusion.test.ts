@@ -33,6 +33,8 @@ const props: WorkspaceProps = {
     termOptions: {},
     flowControl: { limit: 100000, highWater: 10, lowWater: 4 },
     sessionTimeout: 30,
+    transferEnabled: false,
+    transferMaxUpload: 0,
     loginEnabled: false,
     loggingOut: false,
     error: '',

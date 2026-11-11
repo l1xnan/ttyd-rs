@@ -33,6 +33,8 @@ const props: WorkspaceProps = {
     termOptions: {},
     flowControl: { limit: 100000, highWater: 10, lowWater: 4 },
     sessionTimeout: 30,
+    transferEnabled: false,
+    transferMaxUpload: 0,
     loginEnabled: false,
     loggingOut: false,
     error: '',
@@ -108,6 +110,17 @@ describe('Workspace', () => {
         expect(container.querySelectorAll('.terminal-pane')).toHaveLength(1);
         expect(container.querySelector('.workspace-tabbar-actions')).not.toBeNull();
         expect(container.querySelector('.session-toggle')).not.toBeNull();
+        expect(container.querySelectorAll('.workspace-transfer')).toHaveLength(0);
+    });
+
+    it('exposes upload and download buttons when the server enables it', async () => {
+        render(h(Workspace, { ...props, transferEnabled: true, transferMaxUpload: 1024 }), container);
+        await flush();
+
+        const buttons = container.querySelectorAll('.workspace-transfer');
+        expect(buttons).toHaveLength(2);
+        expect(buttons[0].textContent).toContain('Upload');
+        expect(buttons[1].textContent).toContain('Download');
     });
 
     it('adds tabs and replaces the last closed tab with a fresh one', async () => {
