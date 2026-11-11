@@ -1,6 +1,9 @@
 # Rust build output
 /rust/target*/
 
+# Node dependencies (pnpm workspace root)
+/node_modules/
+
 # Docker staging binaries
 /dist/
 

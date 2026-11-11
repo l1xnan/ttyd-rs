@@ -1,0 +1,33 @@
+{
+  "name": "ttyd-rs",
+  "private": true,
+  "description": "Share your terminal over the web",
+  "license": "MIT",
+  "repository": {
+    "url": "git@github.com:tsl0922/ttyd.git",
+    "type": "git"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@12.15.0",
+  "scripts": {
+    "dev": "pnpm --filter ttyd run dev",
+    "dev:rust": "cargo run --manifest-path rust/Cargo.toml --",
+    "preview": "pnpm --filter ttyd run preview",
+    "build": "pnpm run build:web && pnpm run build:rust",
+    "build:web": "pnpm --filter ttyd run build",
+    "build:rust": "cargo build --manifest-path rust/Cargo.toml",
+    "build:release": "pnpm run build:web && cargo build --release --manifest-path rust/Cargo.toml",
+    "test": "pnpm run test:web && pnpm run test:rust",
+    "test:web": "pnpm --filter ttyd run test",
+    "test:rust": "cargo test --manifest-path rust/Cargo.toml",
+    "check": "pnpm run check:web && pnpm run check:rust",
+    "check:web": "pnpm --filter ttyd run check",
+    "check:rust": "cargo fmt --manifest-path rust/Cargo.toml -- --check && cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings",
+    "lint": "pnpm --filter ttyd run lint",
+    "format": "pnpm run format:web && pnpm run format:rust",
+    "format:web": "pnpm --filter ttyd run format",
+    "format:rust": "cargo fmt --manifest-path rust/Cargo.toml"
+  }
+}

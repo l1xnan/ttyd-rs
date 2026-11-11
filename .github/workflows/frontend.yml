@@ -5,10 +5,16 @@ on:
     paths:
     - ".github/workflows/frontend.yml"
     - "html/**"
+    - "package.json"
+    - "pnpm-lock.yaml"
+    - "pnpm-workspace.yaml"
   pull_request:
     paths:
     - ".github/workflows/frontend.yml"
     - "html/**"
+    - "package.json"
+    - "pnpm-lock.yaml"
+    - "pnpm-workspace.yaml"
 
 jobs:
   build:
@@ -22,18 +28,16 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: html/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Install, check and build
         run: |
           pnpm install --frozen-lockfile
-          pnpm run check
-          pnpm test
-          pnpm run build
-        working-directory: html
+          pnpm run check:web
+          pnpm run test:web
+          pnpm run build:web
       - name: Verify single-file output
         run: |
-          test -s dist/index.html
-          test -s dist/index.html.gz
-          ! grep -qE '<script[^>]+src=' dist/index.html
-          ! grep -qE '<link[^>]+rel="stylesheet"' dist/index.html
-        working-directory: html
+          test -s html/dist/index.html
+          test -s html/dist/index.html.gz
+          ! grep -qE '<script[^>]+src=' html/dist/index.html
+          ! grep -qE '<link[^>]+rel="stylesheet"' html/dist/index.html

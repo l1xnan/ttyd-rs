@@ -73,16 +73,19 @@ xattr -d com.apple.quarantine ttyd
 - pnpm 12（执行 `corepack enable` 即可）
 - TLS 依赖所需的 C 编译器（Debian/Ubuntu 上为 `build-essential`，macOS 上为 Xcode Command Line Tools，Windows 上为 Visual Studio Build Tools）
 
+仓库是一个 pnpm workspace：前端位于 `html/`，根目录一个锁文件覆盖全部依赖。
+
 ```sh
-pnpm --dir html install --frozen-lockfile
-pnpm --dir html run check
-pnpm --dir html run build
-cargo build --release --manifest-path rust/Cargo.toml
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run build:release
 ```
+
+`pnpm run build` 就是不带 `--release` 的同一条链路。`pnpm run test` 会同时跑前端与 Rust 测试，`pnpm run dev` 启动 Vite 开发服务器，`pnpm run dev:rust -- -W bash` 启动 ttyd。
 
 二进制文件会生成到 `rust/target/release/ttyd`（Windows 上为 `ttyd.exe`）。
 
-开发时，请先构建一次前端，然后运行 `cargo run --manifest-path rust/Cargo.toml -- -W bash`。修改前端源码时，请使用 [html/README.md](html/README.md) 中描述的 Vite 开发流程。
+开发时，先构建一次前端（`pnpm run build:web`），在一个终端运行 `pnpm run dev:rust -- -W bash`，再在另一个终端运行 `pnpm run dev`。Vite 开发流程见 [html/README.md](html/README.md)。
 
 # 用法
 

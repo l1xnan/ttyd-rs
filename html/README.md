@@ -1,7 +1,8 @@
 # ttyd frontend
 
 The frontend is bundled into a single HTML file that is embedded in the ttyd
-binary.
+binary. It is the `html` package of the pnpm workspace at the repository root,
+so dependencies are installed once from the root lockfile.
 
 ## Prerequisites
 
@@ -10,8 +11,8 @@ binary.
 
 ## Development
 
-1. Start ttyd: `ttyd bash`
-2. Start the Vite dev server: `pnpm run dev`
+1. Start ttyd from the repository root: `pnpm run dev:rust -- -W bash`
+2. Start the Vite dev server: `pnpm run dev` (root) or `pnpm run dev` here
 
 The dev server listens on port 9000 and proxies `/token` and `/ws` to ttyd on
 port 7681. If ttyd is started with `--check-origin`, start it without that flag
@@ -20,9 +21,9 @@ during development because the browser origin is the Vite server.
 ## Build
 
 ```sh
-pnpm install
-pnpm run check
-pnpm run build
+pnpm install --frozen-lockfile   # from the repository root
+pnpm run check:web
+pnpm run build:web
 ```
 
 This writes:

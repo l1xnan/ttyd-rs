@@ -6,11 +6,17 @@ on:
     - ".github/workflows/backend.yml"
     - "html/**"
     - "rust/**"
+    - "package.json"
+    - "pnpm-lock.yaml"
+    - "pnpm-workspace.yaml"
   pull_request:
     paths:
     - ".github/workflows/backend.yml"
     - "html/**"
     - "rust/**"
+    - "package.json"
+    - "pnpm-lock.yaml"
+    - "pnpm-workspace.yaml"
   workflow_call:
 
 env:
@@ -33,14 +39,13 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: html/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Build frontend
-        working-directory: html
         run: |
           pnpm install --frozen-lockfile
-          pnpm run check
-          pnpm test
-          pnpm run build
+          pnpm run check:web
+          pnpm run test:web
+          pnpm run build:web
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -79,12 +84,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: html/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Build frontend
-        working-directory: html
         run: |
           pnpm install --frozen-lockfile
-          pnpm run build
+          pnpm run build:web
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -113,12 +117,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: html/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Build frontend
-        working-directory: html
         run: |
           pnpm install --frozen-lockfile
-          pnpm run build
+          pnpm run build:web
       - uses: dtolnay/rust-toolchain@stable
       - name: Build binary
         run: cargo build --manifest-path rust/Cargo.toml --release
@@ -152,12 +155,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: html/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Build frontend
-        working-directory: html
         run: |
           pnpm install --frozen-lockfile
-          pnpm run build
+          pnpm run build:web
       - uses: dtolnay/rust-toolchain@stable
       - name: Build binary
         run: cargo build --manifest-path rust/Cargo.toml --release

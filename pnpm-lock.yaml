@@ -164,7 +164,9 @@ settings:
 
 importers:
 
-  .:
+  .: {}
+
+  html:
     dependencies:
       '@xterm/addon-clipboard':
         specifier: ^0.2.0

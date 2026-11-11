@@ -81,16 +81,24 @@ Prerequisites:
 - pnpm 12 (`corepack enable` is sufficient)
 - A C compiler for the TLS dependency (`build-essential` on Debian/Ubuntu, Xcode Command Line Tools on macOS, Visual Studio Build Tools on Windows)
 
+The repository is a pnpm workspace: the frontend lives in `html/` and a single
+lockfile at the root covers it.
+
 ```sh
-pnpm --dir html install --frozen-lockfile
-pnpm --dir html run check
-pnpm --dir html run build
-cargo build --release --manifest-path rust/Cargo.toml
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm run build:release
 ```
+
+`pnpm run build` is the same sequence without `--release`. `pnpm run test` runs
+the frontend and Rust suites, `pnpm run dev` starts the Vite dev server and
+`pnpm run dev:rust -- -W bash` starts ttyd against it.
 
 The binary is written to `rust/target/release/ttyd` (or `ttyd.exe` on Windows).
 
-For development, run `cargo run --manifest-path rust/Cargo.toml -- -W bash` after building the frontend once. When changing frontend sources, use the Vite development workflow described in [html/README.md](html/README.md).
+For development, build the frontend once (`pnpm run build:web`), start ttyd with
+`pnpm run dev:rust -- -W bash`, then run `pnpm run dev` in a second terminal. See
+[html/README.md](html/README.md) for the Vite development workflow.
 
 # Usage
 
