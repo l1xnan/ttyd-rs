@@ -142,6 +142,7 @@ OPTIONS:
         --http-transfer-max-upload    Maximum bytes per uploaded file (default: 67108864)
         --http-transfer-session-quota Approximate per-directory quota in bytes, 0 disables (default: 268435456)
         --no-http-follow-cwd  Always use --http-transfer-dir instead of following the shell cwd
+        --config <path>     Read options (and an optional command) from a config file
     -6, --ipv6              Enable IPv6 support
     -S, --ssl               Enable SSL
     -C, --ssl-cert          SSL certificate file path
@@ -153,6 +154,52 @@ OPTIONS:
 ```
 
 Read the example usage on the [upstream ttyd wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage).
+
+## Config file
+
+Use `--config <path>` to keep long option lists out of the shell. The file is an
+*argfile*: one option (with its value) per line, `#` comments, and shell-style
+quoting for values containing spaces. The start command may be the last line.
+
+```text
+# ~/.config/ttyd/ttyd.conf
+--port 8080
+--interface 0.0.0.0
+--writable
+--check-origin
+--http-transfer
+--http-transfer-root ~/share
+-t fontSize=16
+-t enableSixel=true
+--ssl
+--ssl-cert ./certs/cert.pem
+--ssl-key ./certs/key.pem
+--credential-file /etc/ttyd/cred
+bash -x
+```
+
+```sh
+ttyd --config ~/.config/ttyd/ttyd.conf          # uses `bash -x` from the file
+ttyd --config ttyd.conf zsh                     # overrides the command
+ttyd --config ttyd.conf --port 9000             # overrides an option
+```
+
+Rules:
+
+- Options from the file are applied first, so command-line options override
+  them; if both the file and the command line give a command, the command line
+  wins (with all of its arguments).
+- `#` starts a comment (whole line or trailing). A `#` inside a word is kept.
+- Quote values that contain spaces, e.g. `-t 'theme={"background": "green"}'`.
+  Backslashes act as escapes; on Windows prefer `/` or single quotes in paths.
+- `~` and `~/` expand to the home directory (`HOME` / `USERPROFILE`);
+  `~user` and `$VAR` are not expanded.
+- Relative paths are resolved against the **current working directory**, not
+  the config file's directory.
+- Files are UTF-8, limited to 1 MiB, and cannot contain another `--config`
+  (nesting is rejected). Multiple `--config` flags: the last one wins.
+- Nothing is loaded implicitly: without `--config` no file is read. Restrict
+  permissions on config files that contain credentials.
 
 ## Authentication
 

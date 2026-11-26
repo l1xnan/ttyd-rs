@@ -1558,6 +1558,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "shlex",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.26.2",

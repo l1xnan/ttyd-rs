@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -27,6 +27,7 @@ fn parse_args_from(
     if args.is_empty() {
         return Ok(Action::Help);
     }
+    let (args, default_command) = expand_config_files(args)?;
 
     let mut port = 7681u16;
     let mut interface: Option<String> = None;
@@ -211,7 +212,7 @@ fn parse_args_from(
     };
 
     if command.is_empty() {
-        bail!("missing start command");
+        command = default_command.ok_or_else(|| anyhow!("missing start command"))?;
     }
 
     let command_string = command
@@ -309,6 +310,281 @@ fn parse_args_from(
         http_transfer_session_quota,
         http_transfer_follow_cwd,
     })))
+}
+
+const CONFIG_FILE_LIMIT: u64 = 1024 * 1024;
+
+struct ArgFile {
+    options: Vec<OsString>,
+    command: Option<Vec<OsString>>,
+}
+
+/// Expand `--config` into the argument list before the regular option parser runs.
+///
+/// File options are placed first, so options given on the command line override
+/// them. A command written in the file is only used when the command line has none.
+fn expand_config_files(args: Vec<OsString>) -> Result<(Vec<OsString>, Option<Vec<OsString>>)> {
+    // Fast path: leave the argument list completely untouched when no
+    // --config token is present, so ordinary invocations are unchanged.
+    let has_config = args.iter().any(|token| {
+        let text = token.to_string_lossy();
+        text == "--config" || text.starts_with("--config=")
+    });
+    if !has_config {
+        return Ok((args, None));
+    }
+
+    let (rest, path) = match scan_config(&args)? {
+        Some(result) => result,
+        None => return Ok((args, None)),
+    };
+    let file = read_argfile(&path)?;
+    if scan_config(&file.options)?.is_some() {
+        bail!("nested --config is not allowed in {}", path.display());
+    }
+    let mut merged = file.options;
+    merged.extend(rest);
+    Ok((merged, file.command))
+}
+
+/// Remove every `--config[=path]` from the option region (last one wins).
+/// Scanning stops at `--` or at the first positional argument, so a `--config`
+/// that belongs to the child command is left untouched.
+fn scan_config(args: &[OsString]) -> Result<Option<(Vec<OsString>, PathBuf)>> {
+    let mut rest = Vec::with_capacity(args.len());
+    let mut path = None;
+    let mut expect = Expect::None;
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        match expect {
+            Expect::ConfigPath => {
+                path = Some(expand_tilde(token.as_os_str())?);
+                expect = Expect::None;
+                i += 1;
+                continue;
+            }
+            Expect::OptionValue => {
+                rest.push(token.clone());
+                expect = Expect::None;
+                i += 1;
+                continue;
+            }
+            Expect::None => {}
+        }
+
+        let Some(text) = token.to_str() else {
+            rest.push(token.clone());
+            rest.extend(args[i + 1..].iter().cloned());
+            break;
+        };
+
+        if text == "--" || !text.starts_with('-') || text == "-" {
+            rest.extend(args[i..].iter().cloned());
+            break;
+        }
+
+        if let Some(value) = text.strip_prefix("--config=") {
+            path = Some(expand_tilde(OsStr::new(value))?);
+            i += 1;
+            continue;
+        }
+        if text == "--config" {
+            expect = Expect::ConfigPath;
+            i += 1;
+            continue;
+        }
+
+        if let Some(long) = text.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            if option_takes_value(name) && !long.contains('=') {
+                expect = Expect::OptionValue;
+            }
+            rest.push(token.clone());
+            i += 1;
+            continue;
+        }
+
+        let short = &text[1..];
+        if short_cluster_needs_value(short) {
+            expect = Expect::OptionValue;
+        }
+        rest.push(token.clone());
+        i += 1;
+    }
+    if expect == Expect::ConfigPath {
+        bail!("option '--config' requires an argument");
+    }
+    Ok(path.map(|path| (rest, path)))
+}
+
+#[derive(PartialEq, Eq)]
+enum Expect {
+    None,
+    ConfigPath,
+    OptionValue,
+}
+
+fn option_takes_value(name: &str) -> bool {
+    matches!(
+        name,
+        "port"
+            | "interface"
+            | "socket-owner"
+            | "credential"
+            | "credential-file"
+            | "config"
+            | "auth-header"
+            | "uid"
+            | "gid"
+            | "signal"
+            | "cwd"
+            | "index"
+            | "base-path"
+            | "ping-interval"
+            | "srv-buf-size"
+            | "session-timeout"
+            | "session-buffer-size"
+            | "history-limit"
+            | "ssl-cert"
+            | "ssl-key"
+            | "ssl-ca"
+            | "max-clients"
+            | "debug"
+            | "terminal-type"
+            | "client-option"
+            | "http-transfer-root"
+            | "http-transfer-dir"
+            | "http-transfer-max-upload"
+            | "http-transfer-session-quota"
+    )
+}
+
+fn short_takes_value(flag: char) -> bool {
+    matches!(
+        flag,
+        'p' | 'i'
+            | 'U'
+            | 'c'
+            | 'H'
+            | 'u'
+            | 'g'
+            | 's'
+            | 'w'
+            | 'I'
+            | 'b'
+            | 'P'
+            | 'f'
+            | 'C'
+            | 'K'
+            | 'A'
+            | 'm'
+            | 'd'
+            | 'T'
+            | 't'
+    )
+}
+
+/// Whether a short-option cluster consumes the following token as a value.
+///
+/// Lexopt treats the remainder of a cluster as the value of the first
+/// value-taking flag, so `-p9000` and `-p=9000` are self-contained while a
+/// bare `-p` or a cluster ending in `-Wp` needs the next token.
+fn short_cluster_needs_value(cluster: &str) -> bool {
+    for (index, flag) in cluster.char_indices() {
+        if short_takes_value(flag) {
+            // Any remainder (including "=value") is the attached value.
+            return cluster[index + flag.len_utf8()..].is_empty();
+        }
+    }
+    false
+}
+
+/// Expand a leading `~` / `~/` to the user home directory. Other paths (and
+/// non-UTF-8 bytes) are preserved verbatim.
+fn expand_tilde(value: &OsStr) -> Result<PathBuf> {
+    let path = Path::new(value);
+    let home = || home_dir().ok_or_else(|| anyhow!("cannot expand ~ because HOME is not set"));
+    if path.as_os_str() == OsStr::new("~") || path.as_os_str() == OsStr::new("~/") {
+        return home();
+    }
+    if let Ok(rest) = path.strip_prefix("~") {
+        return Ok(home()?.join(rest));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn read_argfile(path: &Path) -> Result<ArgFile> {
+    use std::fs::File;
+
+    let mut file =
+        File::open(path).with_context(|| format!("cannot read config file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("cannot stat config file {}", path.display()))?;
+    if metadata.len() > CONFIG_FILE_LIMIT {
+        bail!(
+            "config file {} is larger than {} bytes",
+            path.display(),
+            CONFIG_FILE_LIMIT
+        );
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read config file {}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("config file {} is not valid UTF-8", path.display()))?;
+
+    let mut options = Vec::new();
+    let mut command_lines: Vec<&str> = Vec::new();
+    let mut in_command = false;
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if in_command {
+            command_lines.push(line);
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let tokens = shlex::split(line).ok_or_else(|| {
+            anyhow!(
+                "invalid quoting in config file {}:{}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        let Some(first) = tokens.first() else {
+            continue;
+        };
+        if first.starts_with('-') && first != "-" {
+            for token in tokens {
+                options.push(expand_tilde(OsStr::new(&token))?.into_os_string());
+            }
+        } else {
+            in_command = true;
+            command_lines.push(line);
+        }
+    }
+
+    let command = if command_lines.is_empty() {
+        None
+    } else {
+        let joined = command_lines.join("\n");
+        let tokens = shlex::split(&joined)
+            .ok_or_else(|| anyhow!("invalid quoting in the command of {}", path.display()))?;
+        if tokens.is_empty() {
+            None
+        } else {
+            Some(
+                tokens
+                    .iter()
+                    .map(|token| expand_tilde(OsStr::new(token)).map(PathBuf::into_os_string))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        }
+    };
+    Ok(ArgFile { options, command })
 }
 
 fn take_string(parser: &mut Parser) -> Result<String> {
@@ -629,6 +905,7 @@ OPTIONS:\n\
         --http-transfer-max-upload    Maximum bytes per uploaded file (default: 67108864)\n\
         --http-transfer-session-quota Approximate per-directory quota in bytes, 0 disables (default: 268435456)\n\
         --no-http-follow-cwd  Always use --http-transfer-dir instead of following the shell cwd\n\
+        --config <path>     Read options (and an optional command) from a config file\n\
     -6, --ipv6              Enable IPv6 support\n\
     -S, --ssl               Enable SSL\n\
     -C, --ssl-cert          SSL certificate file path\n\
@@ -1107,6 +1384,313 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unknown option '-Z'"), "{error}");
+    }
+
+    // ---------------- --config argfile ----------------
+
+    fn config_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ttyd-config-{name}-{}.conf", std::process::id()))
+    }
+
+    fn write_config(name: &str, body: &str) -> PathBuf {
+        let path = config_temp_path(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn config_file_supplies_options_and_command() {
+        let path = write_config(
+            "full",
+            "# comment line\n\
+             --port 8080\n\
+             --writable\n\
+             --check-origin\n\
+             -t fontSize=16\n\
+             -t enableSixel=true\n\
+             bash\n",
+        );
+        let args: Vec<OsString> = vec![OsString::from("--config"), path.as_os_str().to_os_string()];
+        let config = run_config(args);
+        assert_eq!(config.port, 8080);
+        assert!(config.writable);
+        assert!(config.check_origin);
+        let prefs: serde_json::Value = serde_json::from_str(&config.prefs_json).unwrap();
+        assert_eq!(prefs["fontSize"], 16);
+        assert_eq!(prefs["enableSixel"], true);
+        assert_eq!(config.command, [OsString::from("bash")]);
+        assert_eq!(config.command_string, "bash");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn cli_options_override_config_file() {
+        let path = write_config("override", "--port 8080\n--writable\n");
+        let args: Vec<OsString> = vec![
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("--port"),
+            OsString::from("9000"),
+            OsString::from("bash"),
+        ];
+        let config = run_config(args);
+        assert_eq!(config.port, 9000);
+        assert!(config.writable);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn cli_command_overrides_config_command() {
+        let path = write_config("cmd", "--writable\nbash -x\n");
+        let args: Vec<OsString> = vec![
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("zsh"),
+        ];
+        let config = run_config(args);
+        assert_eq!(config.command, [OsString::from("zsh")]);
+        assert_eq!(config.command_string, "zsh");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn accepts_equals_form_and_uses_last_config() {
+        let first = write_config("first", "--port 1111\n");
+        let second = write_config("second", "--port 2222\n");
+        let arg: OsString = OsString::from(format!("--config={}", second.display()));
+        let config = run_config([arg, OsString::from("bash")]);
+        assert_eq!(config.port, 2222);
+
+        let args: Vec<OsString> = vec![
+            OsString::from("--config"),
+            first.as_os_str().to_os_string(),
+            OsString::from("--config"),
+            second.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        let config = run_config(args);
+        assert_eq!(config.port, 2222);
+        std::fs::remove_file(first).ok();
+        std::fs::remove_file(second).ok();
+    }
+
+    #[test]
+    fn config_is_found_after_option_values_and_clusters() {
+        let path = write_config("after", "--history-limit 7\n");
+        let args: Vec<OsString> = vec![
+            OsString::from("--port"),
+            OsString::from("8080"),
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        assert_eq!(run_config(args).history_limit, 7);
+
+        let args: Vec<OsString> = vec![
+            OsString::from("-Wp9000"),
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("bash"),
+        ];
+        let config = run_config(args);
+        assert!(config.writable);
+        assert_eq!(config.port, 9000);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn config_token_after_command_is_not_an_include() {
+        let path = write_config("trailing", "--port 8080\n");
+        let args: Vec<OsString> = vec![
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("bash"),
+            OsString::from("--config"),
+            OsString::from("other.conf"),
+        ];
+        let config = run_config(args);
+        assert_eq!(config.port, 8080);
+        assert_eq!(
+            config.command,
+            [
+                OsString::from("bash"),
+                OsString::from("--config"),
+                OsString::from("other.conf"),
+            ]
+        );
+
+        let args: Vec<OsString> = vec![
+            OsString::from("--config"),
+            path.as_os_str().to_os_string(),
+            OsString::from("--"),
+            OsString::from("bash"),
+            OsString::from("--config"),
+            OsString::from("other.conf"),
+        ];
+        let config = run_config(args);
+        assert_eq!(
+            config.command,
+            [
+                OsString::from("bash"),
+                OsString::from("--config"),
+                OsString::from("other.conf"),
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn config_supports_comments_quotes_and_tilde() {
+        let path = write_config(
+            "quotes",
+            "# leading comment\n\
+             --port 8080 # trailing comment\n\
+             -t 'theme={\"background\": \"green\"}'\n\
+             --terminal-type foo#bar\n\
+             bash\n",
+        );
+        let config = run_config([OsString::from("--config"), path.as_os_str().to_os_string()]);
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.terminal_type, "foo#bar");
+        let prefs: serde_json::Value = serde_json::from_str(&config.prefs_json).unwrap();
+        assert_eq!(prefs["theme"], serde_json::json!({"background": "green"}));
+        std::fs::remove_file(path).ok();
+
+        // `~/` expands to the home directory for both the flag value and tokens.
+        let home = home_dir().unwrap();
+        let expanded = expand_tilde(OsStr::new("~/share")).unwrap();
+        assert_eq!(expanded, home.join("share"));
+    }
+
+    #[test]
+    fn config_file_errors_are_reported() {
+        let missing = config_temp_path("missing");
+        std::fs::remove_file(&missing).ok();
+        let error = parse_args_from(
+            [
+                OsString::from("--config"),
+                missing.as_os_str().to_os_string(),
+                OsString::from("bash"),
+            ],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot read config file"), "{error}");
+
+        let nested = write_config("nested", "--port 8080\n--config other.conf\n");
+        let error = parse_args_from(
+            [
+                OsString::from("--config"),
+                nested.as_os_str().to_os_string(),
+                OsString::from("bash"),
+            ],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nested --config"), "{error}");
+        std::fs::remove_file(nested).ok();
+
+        let unquoted = write_config("unquoted", "--port '8080\n");
+        let error = parse_args_from(
+            [
+                OsString::from("--config"),
+                unquoted.as_os_str().to_os_string(),
+                OsString::from("bash"),
+            ],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("invalid quoting"), "{error}");
+        std::fs::remove_file(unquoted).ok();
+
+        let empty = write_config("empty", "# only a comment\n");
+        let error = parse_args_from(
+            [OsString::from("--config"), empty.as_os_str().to_os_string()],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("missing start command"), "{error}");
+        std::fs::remove_file(empty).ok();
+
+        let error = parse_args_from(["--config"], None).unwrap_err().to_string();
+        assert!(error.contains("requires an argument"), "{error}");
+
+        let huge = write_config("huge", "");
+        std::fs::write(&huge, vec![b'#'; (CONFIG_FILE_LIMIT + 1) as usize]).unwrap();
+        let error = parse_args_from(
+            [
+                OsString::from("--config"),
+                huge.as_os_str().to_os_string(),
+                OsString::from("bash"),
+            ],
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("larger than"), "{error}");
+        std::fs::remove_file(huge).ok();
+    }
+
+    #[test]
+    fn config_keeps_option_values_from_being_treated_as_commands() {
+        // Guard against option_takes_value / short_takes_value drifting from the
+        // parse loop: every value-taking form must still allow a --config that
+        // follows it.
+        let path = write_config("guard", "--history-limit 3\n");
+        let long_value_options = [
+            "--port 7681",
+            "--interface 0.0.0.0",
+            "--socket-owner user:group",
+            "--credential user:pass",
+            "--credential-file /dev/null",
+            "--auth-header X-User",
+            "--uid 0",
+            "--gid 0",
+            "--signal 1",
+            "--cwd /tmp",
+            "--index /dev/null",
+            "--base-path /foo",
+            "--ping-interval 5",
+            "--srv-buf-size 4096",
+            "--session-timeout 30",
+            "--session-buffer-size 4096",
+            "--history-limit 20",
+            "--ssl-cert /dev/null",
+            "--ssl-key /dev/null",
+            "--ssl-ca /dev/null",
+            "--max-clients 1",
+            "--debug 7",
+            "--terminal-type xterm",
+            "--client-option fontSize=16",
+            "--http-transfer-root /tmp",
+            "--http-transfer-dir /tmp",
+            "--http-transfer-max-upload 1024",
+            "--http-transfer-session-quota 1024",
+        ];
+        for text in long_value_options {
+            let mut parts = text.split_whitespace();
+            let name = parts.next().unwrap();
+            let value = parts.next().unwrap();
+            assert!(option_takes_value(&name[2..]), "{name}");
+            let args: Vec<OsString> = vec![
+                OsString::from(name),
+                OsString::from(value),
+                OsString::from("--config"),
+                path.as_os_str().to_os_string(),
+                OsString::from("bash"),
+            ];
+            let scanned = scan_config(&args).unwrap();
+            assert!(scanned.is_some(), "{name}");
+            let (rest, config_path) = scanned.unwrap();
+            assert_eq!(config_path, path);
+            assert_eq!(rest.first().unwrap(), name);
+            assert!(rest.iter().all(|token| token != "--config"), "{name}");
+        }
+        std::fs::remove_file(path).ok();
     }
 
     fn credential_temp_path(name: &str) -> PathBuf {

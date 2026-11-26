@@ -141,6 +141,9 @@ ttyd 1 "September 2016" ttyd "User Manual"
   -v, --version
       Print the version and exit
 
+  --config <path>
+      Read options (and an optional start command) from an argfile; see **CONFIG FILE** below.
+
   -h, --help
       Print this text and exit
 
@@ -179,6 +182,49 @@ to try the example options above, run:
 ```bash
 ttyd -t cursorStyle=bar -t lineHeight=1.5 -t 'theme={"background": "green"}' bash
 ```
+
+# CONFIG FILE
+  Use `--config <path>` to load a long option list from an argfile instead of
+  the shell. Each line holds one option with its value; `#` starts a comment;
+  shell-style quotes protect values containing spaces. The last line may be the
+  start command.
+
+```text
+# ~/.config/ttyd/ttyd.conf
+--port 8080
+--interface 0.0.0.0
+--writable
+--check-origin
+--http-transfer
+--http-transfer-root ~/share
+-t fontSize=16
+-t enableSixel=true
+--ssl
+--ssl-cert ./certs/cert.pem
+--ssl-key ./certs/key.pem
+--credential-file /etc/ttyd/cred
+bash -x
+```
+
+  Run with `ttyd --config ~/.config/ttyd/ttyd.conf`. Options from the file are
+  applied before command-line options, so the command line overrides them; a
+  command given on the command line also replaces the file's command together
+  with its arguments. A command written in the file is used only when the
+  command line has none.
+
+  Values may use single or double quotes (for example
+  `-t 'theme={"background": "green"}'`). A `#` only starts a comment at the
+  start of a word, so `foo#bar` is kept. A trailing backslash or an unclosed
+  quote is an error, reported with the line number. Backslashes otherwise act
+  as shell escapes, so on Windows prefer `/` or single quotes in paths.
+
+  `~` and `~/` expand to the home directory (`HOME` / `USERPROFILE`); `~user`
+  and `$VAR` are not expanded. Relative paths are resolved against the current
+  working directory, not the config file's directory. Files must be valid
+  UTF-8 and at most 1 MiB. A config file may not contain another `--config`
+  (nesting is rejected); when `--config` is repeated the last one wins. No
+  file is read unless `--config` is given. Restrict permissions on config
+  files that contain credentials.
 
 # AUTHENTICATION
   Use `-c username:password` to enable the built-in web login page. The same credential also continues to work with HTTP Basic authentication:

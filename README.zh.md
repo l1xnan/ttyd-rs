@@ -129,6 +129,7 @@ pnpm run build:release
         --http-transfer-max-upload    单个上传文件的最大字节数（默认：67108864）
         --http-transfer-session-quota 每目录近似配额（字节），0 表示不限制（默认：268435456）
         --no-http-follow-cwd  始终使用 --http-transfer-dir，不跟随 shell 的 cwd
+        --config <path>     从配置文件读取选项（以及可选的启动命令）
     -6, --ipv6              启用 IPv6 支持
     -S, --ssl               启用 SSL
     -C, --ssl-cert          SSL 证书文件路径
@@ -140,6 +141,48 @@ pnpm run build:release
 ```
 
 在[上游 ttyd wiki](https://github.com/tsl0922/ttyd/wiki/Example-Usage)中阅读示例用法。
+
+## 配置文件
+
+用 `--config <path>` 把一长串选项从命令行挪进配置文件。该文件是 *argfile*：
+每行一个选项（可带值），支持 `#` 注释和 shell 风格引号，启动命令可以写在最后一行。
+
+```text
+# ~/.config/ttyd/ttyd.conf
+--port 8080
+--interface 0.0.0.0
+--writable
+--check-origin
+--http-transfer
+--http-transfer-root ~/share
+-t fontSize=16
+-t enableSixel=true
+--ssl
+--ssl-cert ./certs/cert.pem
+--ssl-key ./certs/key.pem
+--credential-file /etc/ttyd/cred
+bash -x
+```
+
+```sh
+ttyd --config ~/.config/ttyd/ttyd.conf          # 使用文件里的 `bash -x`
+ttyd --config ttyd.conf zsh                     # 覆盖命令
+ttyd --config ttyd.conf --port 9000             # 覆盖选项
+```
+
+规则：
+
+- 文件里的选项先解析，因此命令行同名选项会覆盖它；若命令行也给出了命令，
+  则以命令行为准（连同其参数），不混用文件里的命令参数。
+- `#` 开始注释（整行或行尾）；单词中间的 `#` 会保留。
+- 含空格的值要加引号，例如 `-t 'theme={"background": "green"}'`。
+  反斜杠是转义符；Windows 路径建议用 `/` 或用单引号包裹。
+- `~` 和 `~/` 展开为主目录（`HOME` / `USERPROFILE`）；不展开 `~user` 和 `$VAR`。
+- 相对路径相对于**进程当前工作目录**解析，而不是配置文件所在目录。
+- 文件须为 UTF-8，最大 1 MiB，且不能再包含 `--config`（禁止嵌套）。
+  多次给出 `--config` 时以最后一个为准。
+- 不会隐式加载任何配置文件：不写 `--config` 就不读文件。配置文件含凭据时
+  请限制其读取权限。
 
 ## 认证
 

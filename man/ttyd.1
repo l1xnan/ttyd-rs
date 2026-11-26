@@ -192,8 +192,48 @@ Cross platform: Linux, macOS, and Windows (ConPTY). On Windows, -s does not deli
       Print the version and exit
 
 .PP
+--config <path>
+      Read options (and an optional start command) from an argfile; see the CONFIG FILE section below.
+
+.PP
 -h, --help
       Print this text and exit
+
+
+.SH CONFIG FILE
+.PP
+Use \fB\fC--config <path>\fR to load a long option list from an argfile instead of the shell. Each line holds one option with its value; \fB\fC#\fR starts a comment; shell-style quotes protect values containing spaces. The last line may be the start command.
+
+.PP
+.RS
+
+.nf
+# ~/.config/ttyd/ttyd.conf
+--port 8080
+--interface 0.0.0.0
+--writable
+--check-origin
+--http-transfer
+--http-transfer-root ~/share
+-t fontSize=16
+-t enableSixel=true
+--ssl
+--ssl-cert ./certs/cert.pem
+--ssl-key ./certs/key.pem
+--credential-file /etc/ttyd/cred
+bash -x
+
+.fi
+.RE
+
+.PP
+Run with \fB\fCttyd --config ~/.config/ttyd/ttyd.conf\fR. Options from the file are applied before command-line options, so the command line overrides them; a command given on the command line also replaces the file's command together with its arguments. A command written in the file is used only when the command line has none.
+
+.PP
+Values may use single or double quotes (for example \fB\fC-t 'theme={"background": "green"}'\fR). A \fB\fC#\fR only starts a comment at the start of a word, so \fB\fCfoo#bar\fR is kept. A trailing backslash or an unclosed quote is an error, reported with the line number. Backslashes otherwise act as shell escapes, so on Windows prefer \fB\fC/\fR or single quotes in paths.
+
+.PP
+\fB\fC~\fR and \fB\fC~/\fR expand to the home directory (\fB\fCHOME\fR / \fB\fCUSERPROFILE\fR); \fB\fC~user\fR and \fB\fC$VAR\fR are not expanded. Relative paths are resolved against the current working directory, not the config file's directory. Files must be valid UTF-8 and at most 1 MiB. A config file may not contain another \fB\fC--config\fR (nesting is rejected); when \fB\fC--config\fR is repeated the last one wins. No file is read unless \fB\fC--config\fR is given. Restrict permissions on config files that contain credentials.
 
 
 .SH CLIENT OPTIONS
