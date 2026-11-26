@@ -236,6 +236,83 @@ Values may use single or double quotes (for example \fB\fC-t 'theme={"background
 \fB\fC~\fR and \fB\fC~/\fR expand to the home directory (\fB\fCHOME\fR / \fB\fCUSERPROFILE\fR); \fB\fC~user\fR and \fB\fC$VAR\fR are not expanded. Relative paths are resolved against the current working directory, not the config file's directory. Files must be valid UTF-8 and at most 1 MiB. A config file may not contain another \fB\fC--config\fR (nesting is rejected); when \fB\fC--config\fR is repeated the last one wins. No file is read unless \fB\fC--config\fR is given. Restrict permissions on config files that contain credentials.
 
 
+.SH SYSTEMD
+.PP
+ttyd stays in the foreground and logs to stderr, so systemd can supervise it with \fB\fCType=simple\fR. It does not daemonize and it does not write a pid file. \fB\fCsystemctl stop\fR sends \fB\fCSIGTERM\fR; ttyd stops listening and signals each running command with \fB\fC-s\fR (default \fB\fCSIGHUP\fR). Sessions and history are in memory only and end with the process. Do not put \fB\fC-o\fR, \fB\fC-q\fR, or \fB\fC-B\fR in a service: \fB\fC-o\fR and \fB\fC-q\fR exit when clients leave, and \fB\fC-B\fR tries to open a browser.
+
+.PP
+Run the service as an unprivileged user and keep the password in a credential file. Replace \fB\fCchoose-a-long-password\fR. If \fB\fC/usr/sbin/nologin\fR is missing, use \fB\fC/sbin/nologin\fR. That shell only blocks interactive login; the page still starts the last line of the config file.
+
+.PP
+.RS
+
+.nf
+sudo useradd --system --create-home --home-dir /var/lib/ttyd --user-group --shell /usr/sbin/nologin ttyd
+sudo install -d -m 0755 /etc/ttyd
+sudo tee /etc/ttyd/ttyd.conf >/dev/null <<'EOF'
+--port 7681
+--interface 127.0.0.1
+--writable
+--check-origin
+--credential-file /etc/ttyd/cred
+--cwd /var/lib/ttyd
+/bin/bash
+EOF
+sudo tee /etc/ttyd/cred >/dev/null <<'EOF'
+ttyd:choose-a-long-password
+EOF
+sudo chown ttyd:ttyd /etc/ttyd/cred
+sudo chmod 600 /etc/ttyd/cred
+
+.fi
+.RE
+
+.PP
+Install this unit as \fB\fC/etc/systemd/system/ttyd.service\fR. \fB\fCExecStart\fR assumes the binary from the install instructions, \fB\fC/usr/local/bin/ttyd\fR.
+
+.PP
+.RS
+
+.nf
+[Unit]
+Description=Web terminal (ttyd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ttyd
+Group=ttyd
+WorkingDirectory=/var/lib/ttyd
+ExecStart=/usr/local/bin/ttyd --config /etc/ttyd/ttyd.conf
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
+.fi
+.RE
+
+.PP
+.RS
+
+.nf
+sudo systemctl daemon-reload
+sudo systemctl enable --now ttyd
+
+.fi
+.RE
+
+.PP
+Sign in at \fB\fChttp://127.0.0.1:7681\fR as \fB\fCttyd\fR. Logs are in the journal (\fB\fCjournalctl -u ttyd\fR).
+
+.PP
+The shell runs as the \fB\fCttyd\fR user, so do not point the start command at a root shell. \fB\fC--interface 127.0.0.1\fR listens on this machine only; keep \fB\fC--credential-file\fR and \fB\fC--check-origin\fR when the port is reachable from other hosts. Relative paths in the config file follow \fB\fCWorkingDirectory\fR, and \fB\fC~\fR expands to that user's home (\fB\fC/var/lib/ttyd\fR). \fB\fCWorkingDirectory\fR is the ttyd process cwd; \fB\fC--cwd\fR is where the shell starts. \fB\fCUser=\fR already selects the account; do not also pass \fB\fC-u\fR or \fB\fC-g\fR (those start as root, bind, then drop). For a port below 1024, set \fB\fCAmbientCapabilities=CAP_NET_BIND_SERVICE\fR instead of running as root. \fB\fC--random-credential\fR changes the password on every start. A restart drops every session. With \fB\fC--ssl\fR, the \fB\fCttyd\fR user must be able to read the certificate and the key. \fB\fCProtectSystem=\fR and \fB\fCProtectHome=\fR also confine the shell; add \fB\fCReadWritePaths=/var/lib/ttyd\fR when using them.
+
+
 .SH CLIENT OPTIONS
 .PP
 ttyd has a mechanism to pass server side command-line arguments to the browser page which is called \fBclient options\fP:

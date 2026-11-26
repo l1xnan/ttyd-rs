@@ -184,6 +184,80 @@ ttyd --config ttyd.conf --port 9000             # 覆盖选项
 - 不会隐式加载任何配置文件：不写 `--config` 就不读文件。配置文件含凭据时
   请限制其读取权限。
 
+## 用 systemd 守护运行
+
+ttyd 停留在前台，并把日志写到 stderr，因此用 systemd 的 `Type=simple` 直接看管即可。它没有自行 daemon 化的模式，也不写 pid 文件。`systemctl stop` 发送 `SIGTERM`：ttyd 停止监听，再按 `-s` 向每个正在运行的命令发信号（默认 `SIGHUP`）。会话和历史只存在于内存中，进程退出后即消失。
+
+服务里不要使用 `-o`、`-q` 或 `-B`。前两个会在客户端断开后退出，`-B` 会尝试打开浏览器。
+
+用一个专用的非特权用户运行，并把口令放在凭据文件里。口令不会出现在单元文件或进程列表中：
+
+```sh
+sudo useradd --system --create-home --home-dir /var/lib/ttyd \
+    --user-group --shell /usr/sbin/nologin ttyd
+sudo install -d -m 0755 /etc/ttyd
+sudo tee /etc/ttyd/ttyd.conf >/dev/null <<'EOF'
+--port 7681
+--interface 127.0.0.1
+--writable
+--check-origin
+--credential-file /etc/ttyd/cred
+--cwd /var/lib/ttyd
+/bin/bash
+EOF
+sudo tee /etc/ttyd/cred >/dev/null <<'EOF'
+ttyd:choose-a-long-password
+EOF
+sudo chown ttyd:ttyd /etc/ttyd/cred
+sudo chmod 600 /etc/ttyd/cred
+```
+
+把 `choose-a-long-password` 换成实际口令。系统若没有 `/usr/sbin/nologin`，把 `--shell` 改成 `/sbin/nologin`。这个登录壳只是禁止交互登录；网页里启动的程序仍是配置文件最后一行的 `/bin/bash`。
+
+`/etc/systemd/system/ttyd.service`：
+
+```ini
+[Unit]
+Description=Web terminal (ttyd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ttyd
+Group=ttyd
+WorkingDirectory=/var/lib/ttyd
+ExecStart=/usr/local/bin/ttyd --config /etc/ttyd/ttyd.conf
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now ttyd
+sudo systemctl status ttyd
+journalctl -u ttyd -e
+```
+
+用浏览器打开 `http://127.0.0.1:7681`，用户名 `ttyd`，口令是 `/etc/ttyd/cred` 里冒号后面的部分。
+
+这个单元需要注意：
+
+- 网页里的 shell 以用户 `ttyd` 运行。加上 `--writable` 之后，浏览器里能做的事就是这个用户能做的事。保持该账号非特权，不要把启动命令换成 root shell。
+- `--interface 127.0.0.1` 只接受本机连接。要对其他主机提供服务，在前面放一个带 TLS 的反向代理，或把接口改成具体地址。只要端口能从其他主机访问，就保留 `--credential-file` 和 `--check-origin`。
+- 配置文件里的相对路径按单元的 `WorkingDirectory` 解析，不是按 `/etc/ttyd`。`~` 展开成该用户的主目录 `/var/lib/ttyd`。证书、私钥和目录请写绝对路径。启用 `--ssl` 时，`ttyd` 用户必须能读取证书和私钥。
+- `WorkingDirectory` 是 ttyd 进程的当前目录；`--cwd` 是网页里 shell 的起始目录。上面的例子把两者都设为 `/var/lib/ttyd`。
+- `User=` 已经选定运行账号，不要再加 `-u` / `-g`。这两个选项用于进程以 root 启动、绑定端口后再降权。7681 不需要这样做。若要监听 1024 以下的端口，给这个用户设置 `AmbientCapabilities=CAP_NET_BIND_SERVICE`，而不是把服务改成 root。
+- `--random-credential` 每次启动都会换一套口令，并打印到 stderr，已记住的登录也会失效。长期运行的服务请使用凭据文件。
+- `Restart=on-failure` 不会恢复会话。服务重启后，已打开的 shell 都会消失。
+- stderr 进入 journal。需要更详细的日志时，在配置文件里调高 `--debug`。
+- `ProtectSystem=` 和 `ProtectHome=` 同样会限制这个 shell，而不只是 ttyd 进程。只有在 shell 不需要写系统其余部分时，才加上 `ProtectSystem=strict`、`ProtectHome=true` 和 `ReadWritePaths=/var/lib/ttyd`。
+
 ## 认证
 
 使用 `-c username:password` 启用内置 Web 登录页。同一凭据仍可用于 HTTP Basic 认证：

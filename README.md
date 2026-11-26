@@ -201,6 +201,109 @@ Rules:
 - Nothing is loaded implicitly: without `--config` no file is read. Restrict
   permissions on config files that contain credentials.
 
+## Run under systemd
+
+ttyd stays in the foreground and writes its log to stderr, so a systemd service
+supervises it with `Type=simple`. It does not daemonize and it does not write a
+pid file. `systemctl stop` sends `SIGTERM`. ttyd then stops accepting
+connections and signals each running command with `-s` (default `SIGHUP`).
+Sessions and history live only in memory and disappear when the process exits.
+
+Do not put `-o`, `-q`, or `-B` in the service. `-o` and `-q` exit when clients
+disconnect, and `-B` tries to open a browser.
+
+Run it as a dedicated unprivileged user, and keep the password in a credential
+file so it is not stored in the unit or shown in the process list:
+
+```sh
+sudo useradd --system --create-home --home-dir /var/lib/ttyd \
+    --user-group --shell /usr/sbin/nologin ttyd
+sudo install -d -m 0755 /etc/ttyd
+sudo tee /etc/ttyd/ttyd.conf >/dev/null <<'EOF'
+--port 7681
+--interface 127.0.0.1
+--writable
+--check-origin
+--credential-file /etc/ttyd/cred
+--cwd /var/lib/ttyd
+/bin/bash
+EOF
+sudo tee /etc/ttyd/cred >/dev/null <<'EOF'
+ttyd:choose-a-long-password
+EOF
+sudo chown ttyd:ttyd /etc/ttyd/cred
+sudo chmod 600 /etc/ttyd/cred
+```
+
+Replace `choose-a-long-password`. If `/usr/sbin/nologin` does not exist, use
+`/sbin/nologin` for `--shell`. That shell only blocks interactive login. The
+program started in the browser is still the last line of the config file,
+`/bin/bash`.
+
+`/etc/systemd/system/ttyd.service`:
+
+```ini
+[Unit]
+Description=Web terminal (ttyd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ttyd
+Group=ttyd
+WorkingDirectory=/var/lib/ttyd
+ExecStart=/usr/local/bin/ttyd --config /etc/ttyd/ttyd.conf
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now ttyd
+sudo systemctl status ttyd
+journalctl -u ttyd -e
+```
+
+Open `http://127.0.0.1:7681` and sign in as `ttyd`. The password is the text
+after the colon in `/etc/ttyd/cred`.
+
+Notes for this unit:
+
+- The shell in the page runs as the `ttyd` user. With `--writable`, a browser
+  can do anything that user can do. Keep the account unprivileged, and do not
+  point the start command at a root shell.
+- `--interface 127.0.0.1` accepts connections from this machine only. To serve
+  other hosts, put a reverse proxy with TLS in front, or bind a specific
+  address. Keep `--credential-file` and `--check-origin` whenever the port is
+  reachable from other hosts.
+- Relative paths in the config file are resolved against the unit's
+  `WorkingDirectory`, not against `/etc/ttyd`. `~` expands to this user's home,
+  `/var/lib/ttyd`. Use absolute paths for certificates, keys, and directories.
+  With `--ssl`, the `ttyd` user must be able to read the certificate and the key.
+- `WorkingDirectory` is the cwd of the ttyd process. `--cwd` is the directory
+  where the shell in the page starts. The example sets both to `/var/lib/ttyd`.
+- `User=` already selects the account. Do not also pass `-u` or `-g`. Those
+  options are for a process that starts as root, binds the port, and then drops
+  privileges. Port 7681 does not need that. For a port below 1024, set
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` on this user instead of running
+  the service as root.
+- `--random-credential` prints a new password to stderr on every start and
+  invalidates remembered logins. Use a credential file for a long-running
+  service.
+- `Restart=on-failure` does not restore sessions. A restart drops every shell.
+- stderr goes to the journal. Raise `--debug` in the config file for a more
+  detailed log.
+- `ProtectSystem=` and `ProtectHome=` confine the shell as well as ttyd. Add
+  `ProtectSystem=strict`, `ProtectHome=true`, and
+  `ReadWritePaths=/var/lib/ttyd` only when the shell should not write the rest
+  of the system.
+
 ## Authentication
 
 Use `-c username:password` to enable the built-in web login page. The same

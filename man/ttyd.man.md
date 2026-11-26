@@ -226,6 +226,86 @@ bash -x
   file is read unless `--config` is given. Restrict permissions on config
   files that contain credentials.
 
+# SYSTEMD
+  ttyd stays in the foreground and logs to stderr, so systemd can supervise it
+  with `Type=simple`. It does not daemonize and it does not write a pid file.
+  `systemctl stop` sends `SIGTERM`; ttyd stops listening and signals each
+  running command with `-s` (default `SIGHUP`). Sessions and history are in
+  memory only and end with the process. Do not put `-o`, `-q`, or `-B` in a
+  service: `-o` and `-q` exit when clients leave, and `-B` tries to open a
+  browser.
+
+  Run the service as an unprivileged user and keep the password in a credential
+  file. Replace `choose-a-long-password`. If `/usr/sbin/nologin` is missing,
+  use `/sbin/nologin`. That shell only blocks interactive login; the page still
+  starts the last line of the config file.
+
+```sh
+sudo useradd --system --create-home --home-dir /var/lib/ttyd \
+    --user-group --shell /usr/sbin/nologin ttyd
+sudo install -d -m 0755 /etc/ttyd
+sudo tee /etc/ttyd/ttyd.conf >/dev/null <<'EOF'
+--port 7681
+--interface 127.0.0.1
+--writable
+--check-origin
+--credential-file /etc/ttyd/cred
+--cwd /var/lib/ttyd
+/bin/bash
+EOF
+sudo tee /etc/ttyd/cred >/dev/null <<'EOF'
+ttyd:choose-a-long-password
+EOF
+sudo chown ttyd:ttyd /etc/ttyd/cred
+sudo chmod 600 /etc/ttyd/cred
+```
+
+  Install this unit as `/etc/systemd/system/ttyd.service`. `ExecStart` assumes
+  the binary from the install instructions, `/usr/local/bin/ttyd`.
+
+```ini
+[Unit]
+Description=Web terminal (ttyd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ttyd
+Group=ttyd
+WorkingDirectory=/var/lib/ttyd
+ExecStart=/usr/local/bin/ttyd --config /etc/ttyd/ttyd.conf
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now ttyd
+```
+
+  Sign in at `http://127.0.0.1:7681` as `ttyd`. Logs are in the journal
+  (`journalctl -u ttyd`).
+
+  The shell runs as the `ttyd` user, so do not point the start command at a
+  root shell. `--interface 127.0.0.1` listens on this machine only; keep
+  `--credential-file` and `--check-origin` when the port is reachable from
+  other hosts. Relative paths in the config file follow `WorkingDirectory`,
+  and `~` expands to that user's home (`/var/lib/ttyd`). `WorkingDirectory` is
+  the ttyd process cwd; `--cwd` is where the shell starts. `User=` already
+  selects the account; do not also pass `-u` or `-g` (those start as root,
+  bind, then drop). For a port below 1024, set
+  `AmbientCapabilities=CAP_NET_BIND_SERVICE` instead of running as root.
+  `--random-credential` changes the password on every start. A restart drops
+  every session. With `--ssl`, the `ttyd` user must be able to read the
+  certificate and the key. `ProtectSystem=` and `ProtectHome=` also confine
+  the shell; add `ReadWritePaths=/var/lib/ttyd` when using them.
+
 # AUTHENTICATION
   Use `-c username:password` to enable the built-in web login page. The same credential also continues to work with HTTP Basic authentication:
 
