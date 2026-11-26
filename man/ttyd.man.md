@@ -465,4 +465,4 @@ location ~ ^/ttyd(.*)$ {
 ```
 
 # AUTHOR
-  Shuanglei Tao \<tsl0922@gmail.com\> Visit https://github.com/tsl0922/ttyd to get more information and report bugs.
+  Shuanglei Tao \<tsl0922@gmail.com\> Visit https://github.com/l1xnan/ttyd-rs to get more information and report bugs.

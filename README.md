@@ -531,3 +531,7 @@ Modern browsers, See [Browser Support](https://github.com/xtermjs/xterm.js#brows
 
 * [Wetty](https://github.com/krishnasrinivas/wetty): [Node](https://nodejs.org) based web terminal (SSH/login)
 * [GoTTY](https://github.com/yudai/gotty): [Go](https://golang.org) based web terminal
+
+## Acknowledgments
+
+This project is a Rust implementation that follows [tsl0922/ttyd](https://github.com/tsl0922/ttyd) by Shuanglei Tao. The command-line interface, client options, and browser terminal behavior are based on that project, so existing ttyd usage still applies. Thanks to Shuanglei Tao and the upstream contributors.

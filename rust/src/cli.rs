@@ -915,7 +915,7 @@ OPTIONS:\n\
     -v, --version           Print the version and exit\n\
     -h, --help              Print this text and exit\n\
 \n\
-Visit https://github.com/tsl0922/ttyd to get more information and report bugs."
+Visit https://github.com/l1xnan/ttyd-rs to get more information and report bugs."
     );
 }
 

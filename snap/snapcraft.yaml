@@ -22,7 +22,7 @@ apps:
 
 parts:
   ttyd:
-    source: https://github.com/tsl0922/ttyd
+    source: https://github.com/l1xnan/ttyd-rs
     source-type: git
     plugin: rust
     rust-channel: "1.88"

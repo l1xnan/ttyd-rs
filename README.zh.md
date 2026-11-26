@@ -372,3 +372,7 @@ Windows 上的 ConPTY 不会原样转发 ZMODEM、trzsz 和 Sixel 使用的二�
 
 - [Wetty](https://github.com/krishnasrinivas/wetty)：基于 [Node.js](https://nodejs.org) 的 Web 终端（SSH/登录）
 - [GoTTY](https://github.com/yudai/gotty)：基于 [Go](https://golang.org) 的 Web 终端
+
+## 致谢
+
+本项目是参考 [tsl0922/ttyd](https://github.com/tsl0922/ttyd)（作者 Shuanglei Tao）实现的 Rust 版本。命令行接口、客户端选项和浏览器终端行为沿用该项目，因此原有的 ttyd 用法仍然适用。感谢 Shuanglei Tao 与上游贡献者。
